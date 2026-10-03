@@ -1,88 +1,176 @@
-# RabbitMQ: AMQP-концепции — глубоко
+# RabbitMQ: AMQP-модель и концепции — глубоко
 
-> **Цель:** понять AMQP-модель "снизу": exchange, queue, binding, DLX, vhosts.
+> **Цель:** понять AMQP-модель снизу: exchange, queue, binding, DLX, vhosts — и когда что применять.
 
 ---
 
 ## 1. AMQP-модель — что куда идёт
 
 ```
-Producer → Exchange → (bindings) → Queue → Consumer
+                            ┌──────────┐
+                   ┌───────►│ Queue A  │───► Consumer A1 (ack)
+                   │        └──────────┘
+Producer ──► Exchange ──┤
+   (publish)    │        ┌──────────┐
+                   └───────►│ Queue B  │───► Consumer B1 (ack)
+                            └──────────┘
 ```
 
-**Producer** — приложение, которое шлёт сообщение. Он не знает, кто его прочитает.
+**Producer** — приложение, которое публикует сообщение. Оно **не знает**, кто его прочитает. Знает только exchange и routing_key.
 
-**Exchange** — "почтальон", решает, в какую очередь положить сообщение.
+**Exchange** — «почтальон»: по routing_key и binding-правилам решает, в какую очередь положить.
 
-**Queue** — буфер, где сообщения ждут, пока consumer их заберёт.
+**Queue** — FIFO-буфер, где сообщения ждут consumer.
 
-**Consumer** — приложение, которое читает (может подтвердить = ack).
+**Binding** — правило: «сообщения с routing_key=X → очередь Y».
 
-**Binding** — правило: "сообщения с routing_key = X клади в очередь Y".
+**Consumer** — читает очередь и подтверждает обработку (ack) или отклоняет (nack/reject).
+
+**VHost** — виртуальный хост (изоляция: права, exchanges, очереди). По умолчанию — `/`.
+
+**Channel** — легковесное TCP-соединение внутри одного connection. Позволяет параллельно работать с RabbitMQ без открытия новых TCP-сокетов (1 connection = до 65K channels).
 
 ---
 
-## 2. Типы Exchange — как они работают
+## 2. Типы Exchange — детально с примерами
 
-| Тип | Маршрутизация | Характеристики |
-|-----|--------------|----------------|
-| **Direct** | routing_key = queue name | 1:1, точное совпадение |
-| **Fanout** | всем подписанным очередям | 1:N, broadcast |
-| **Topic** | routing_key по шаблону (topic.#) | Гибкая маршрутизация |
-| **Headers** | по заголовкам (key-value) | Максимальная гибкость |
-
-### Direct — когда нужно отправить "точно в одну очередь"
+### Direct (точное совпадение routing_key)
 
 ```
-Producer → Exchange(direct) → binding("order.created") → Queue "orders"
+Producer: routing_key="order.created"
+Exchange(direct):
+  binding("order.created") → Queue "orders"
+  binding("user.created")  → Queue "users"
 ```
 
-### Fanout — когда нужно разослать всем
+**Когда:** 1:1 доставка, RPC, конкретная задача в конкретную очередь.
+
+### Fanout (broadcast всем подписанным очередям)
 
 ```
-Producer → Exchange(fanout) → Queue "email" (всем)
-                             → Queue "sms" (всем)
-                             → Queue "push" (всем)
+Producer: (routing_key игнорируется)
+Exchange(fanout):
+  → Queue "email"  (send email)
+  → Queue "sms"    (send sms)
+  → Queue "push"   (send push)
 ```
 
-### Topic — когда нужно фильтровать по routing key
+**Когда:** одно событие → несколько независимых обработчиков. Например: «заказ создан» → отправить email, обновить аналитику, очистить кэш.
+
+### Topic (маршрутизация по шаблону routing_key)
 
 ```
-Producer отправляет с routing_key = "user.created.europe"
-Exchange(topic) → binding("user.#") → Queue "user-events"
-                → binding("*.created.*") → Queue "creation-events"
+Producer: routing_key="order.created.europe"
+Exchange(topic):
+  binding("order.#")        → Queue "all-order-events"
+  binding("*.created.*")    → Queue "all-creation-events"
+  binding("#.europe")       → Queue "europe-events"
 ```
+
+**Символы:**
+- `*` — ровно одно слово (разделённое точкой)
+- `#` — ноль или более слов
+
+**Когда:** сложная гибкая маршрутизация. Например: события по регионам (`order.*.europe`), по типам (`*.created.*`).
+
+### Headers (маршрутизация по заголовкам сообщения)
+
+```
+Producer: headers={"format": "json", "type": "report"}
+Exchange(headers):
+  binding(x-match=all, format=json, type=report) → Queue "json-reports"
+  binding(x-match=any, format=xml, format=csv)   → Queue "structured-reports"
+```
+
+**Когда:** если routing_key неудобен — например, множество опциональных параметров.
 
 ---
 
-## 3. Dead Letter Exchange (DLX)
+## 3. Свойства очередей
 
-**Проблема:** что происходит с сообщением, которое consumer не смог обработать?
+| Свойство | Что делает | Когда use |
+|----------|-----------|----------|
+| `durable=True` | Очередь переживает рестарт брокера | Всегда для продакшена |
+| `auto_delete=True` | Удаляется, когда отключается последний consumer | Временные RPC-очереди |
+| `exclusive=True` | Только один consumer, удаляется при его отключении | RPC, временные очереди |
+| `x-message-ttl` | TTL сообщения в ms (если не обработано — в DLX) | Retry-очереди |
+| `x-dead-letter-exchange` | Куда уходят упавшие сообщения | Всегда для продакшена |
+| `x-max-length` | Максимальная длина очереди | Защита от переполнения |
+| `x-queue-mode=lazy` | Lazy queue — сообщения на диске, не в RAM | Большие очереди (>1M сообщений) |
 
-**Без DLX:** reject → сообщение **теряется навсегда**.
+---
 
-**С DLX:** reject → сообщение уходит на DLX → его может прочитать специальный consumer (мониторинг ошибок, повторная попытка).
+## 4. Dead Letter Exchange (DLX)
+
+**Проблема:** consumer не может обработать сообщение. Что дальше?
+
+**Без DLX:** `basic.reject(requeue=False)` → сообщение **теряется навсегда**.
+
+**С DLX:** reject → сообщение уходит на DLX → специальный consumer мониторит ошибки.
 
 ```python
-# Настройка DLX для очереди
+# Настройка:
 channel.queue_declare(
     queue="orders",
     arguments={
-        "x-dead-letter-exchange": "orders.dlx",  # куда уходят упавшие
-        "x-message-ttl": 86400000,  # 24 часа в ms
+        "x-dead-letter-exchange": "orders.dlx",
+        "x-message-ttl": 86_400_000,  # 24 часа
+        "x-dead-letter-routing-key": "orders.dead",
     }
 )
+
+# Очередь для dead-сообщений:
+channel.queue_declare("orders.dead", durable=True)
+channel.queue_bind("orders.dead", "orders.dlx", "orders.dead")
 ```
 
-**Когда сообщение попадает в DLX:**
-1. `basic.reject` с `requeue=false`
-2. Истечение TTL (x-message-ttl)
-3. Превышение лимита попыток (через custom header x-retry)
+### Retry-паттерн через DLX
+
+```
+Queue "orders" (TTL=1s) → DLX "orders.retry" → Queue "orders.work" → Consumer
+Если ошибка → reject → "orders.retry" → "orders.work" (через 1s) → retry
+
+Реализация:
+1. orders.work — основная рабочая очередь
+2. orders.retry — очередь с TTL=delay (exponential backoff)
+3. orders.dead — DLQ после N попыток (через x-retries header)
+```
 
 ---
 
-> **На собесе:** «Как работает RabbitMQ?» —  
-> «Producer отправляет сообщение в exchange. Exchange по routing key
-> и bindings кладёт в очередь. Consumer забирает (pull) или получает
-> (push). После обработки — ack. Если ack нет — сообщение возвращается
-> в очередь (после timeout). DLX для упавших сообщений.»
+## 5. Quorum Queues (RabbitMQ 3.8+)
+
+```python
+channel.queue_declare(
+    queue="critical-orders",
+    arguments={"x-queue-type": "quorum"},
+    durable=True,
+)
+```
+
+**Преимущества над классическими mirrored-очередями:**
+- RAFT-консенсус (не master-slave)
+- Автоматическое восстановление после split-brain
+- Гарантированная доставка (не теряются сообщения при сбое узла)
+
+**Минусы:** чуть выше latency, нельзя `auto_delete` и `exclusive`.
+
+---
+
+## 6. VHosts и права
+
+```
+VHost "/"         — дефолтный
+VHost "staging"   — тестовое окружение
+VHost "customers" — отдельный домен для customer-сервиса
+
+rabbitmqctl add_vhost staging
+rabbitmqctl set_permissions -p staging user ".*" ".*" ".*"
+```
+
+**Когда:** изоляция окружений в одном кластере, продуктовые домены, multi-tenancy.
+
+---
+
+> **На собесе:** «Как работает RabbitMQ?» —
+> «Producer шлёт сообщение в exchange. Exchange по routing key и bindings определяет очередь. Consumer читает и подтверждает (basic_ack). Если не подтвердил — после таймаута сообщение возвращается. DLX — для упавших сообщений. Ключевые гарантии: publisher confirms (producer-уровень), consumer ack, persistent messages + durable queues, outbox pattern.»

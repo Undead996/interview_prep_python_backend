@@ -1,95 +1,161 @@
-# Задачи FastAPI — расширенный разбор
+# Задачи FastAPI — 5 задач с разбором
 
 ---
 
-## Задача 1. CRUD с SQLAlchemy 2.0
-
-**Условие:** Эндпоинты GET/POST/PUT/DELETE для `Product(id, name, price)` с SQLAlchemy 2.0 async + Dependency Override.
+## Задача 1. CRUD с SQLAlchemy 2.0 async + Pydantic
 
 ```python
-# Product model
-class Product(Base):
-    __tablename__ = "products"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(100))
-    price: Mapped[float] = mapped_column(Float)
-
-# Pydantic schema
+# Pydantic:
 class ProductCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     price: float = Field(gt=0)
 
-# Endpoint
-@app.get("/api/products/{product_id}")
+class ProductResponse(BaseModel):
+    id: int
+    name: str
+    price: float
+    model_config = {"from_attributes": True}
+
+# Endpoints:
+@app.get("/api/products/{product_id}", response_model=ProductResponse)
 async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
     stmt = select(Product).where(Product.id == product_id)
     result = await db.execute(stmt)
-    product = result.scalar_one_or_none()
-    if not product:
-        raise HTTPException(status_code=404)
+    if (product := result.scalar_one_or_none()) is None:
+        raise HTTPException(404, detail="Product not found")
     return product
 
-@app.post("/api/products", status_code=201)
+@app.post("/api/products", status_code=201, response_model=ProductResponse)
 async def create_product(payload: ProductCreate, db: AsyncSession = Depends(get_db)):
     product = Product(**payload.model_dump())
     db.add(product)
     await db.commit()
     await db.refresh(product)
     return product
+
+@app.put("/api/products/{product_id}", response_model=ProductResponse)
+async def update_product(product_id: int, payload: ProductCreate, db: AsyncSession = Depends(get_db)):
+    stmt = select(Product).where(Product.id == product_id)
+    result = await db.execute(stmt)
+    if (product := result.scalar_one_or_none()) is None:
+        raise HTTPException(404)
+    for key, value in payload.model_dump().items():
+        setattr(product, key, value)
+    await db.commit()
+    await db.refresh(product)
+    return product
+
+@app.delete("/api/products/{product_id}", status_code=204)
+async def delete_product(product_id: int, db: AsyncSession = Depends(get_db)):
+    stmt = select(Product).where(Product.id == product_id)
+    result = await db.execute(stmt)
+    if (product := result.scalar_one_or_none()) is None:
+        raise HTTPException(404)
+    await db.delete(product)
+    await db.commit()
 ```
 
-**Что проверяют:** SQLAlchemy async, Pydantic-валидация, HTTP-статусы, обработка not found.
+**Что проверяют:** SQLAlchemy async, Pydantic, HTTP-статусы, обработка 404.
 
 ---
 
-## Задача 2. JWT-аутентификация
-
-**Условие:** Логин + защищённый эндпоинт `/api/profile` с Bearer JWT-токеном.
+## Задача 2. JWT-аутентификация + RBAC
 
 ```python
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-
-SECRET_KEY = "secret"
+SECRET_KEY = "your-secret-32-chars-min"
 ALGORITHM = "HS256"
-pwd_context = CryptContext(schemes=["bcrypt"])
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
-def create_token(user_id: int) -> str:
-    return jwt.encode(
-        {"sub": str(user_id), "exp": datetime.utcnow() + timedelta(hours=1)},
-        SECRET_KEY, algorithm=ALGORITHM
-    )
+def create_access_token(user_id: int, role: str) -> str:
+    return jwt.encode({
+        "sub": str(user_id),
+        "role": role,
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=30),
+    }, SECRET_KEY, algorithm=ALGORITHM)
 
 async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = int(payload.get("sub"))
-    except (JWTError, ValueError):
-        raise HTTPException(status_code=401)
-    user = await db.get(User, user_id)
-    if not user:
-        raise HTTPException(status_code=401)
-    return user
-```
+        user = await db.get(User, int(payload["sub"]))
+        if not user: raise HTTPException(401)
+        return user
+    except (JWTError, ValueError): raise HTTPException(401)
 
-**Что проверяют:** JWT encode/decode, bcrypt, OAuth2PasswordBearer, dependency override.
+def require_role(role: str):
+    async def checker(token: str = Depends(oauth2_scheme)):
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("role") != role: raise HTTPException(403)
+        return True
+    return checker
+```
 
 ---
 
-## Задача 3. Контрактный тест OpenAPI
-
-**Условие:** Проверить, что все эндпоинты имеют `summary` и ответ соответствует схеме.
+## Задача 3. Dependency Override в тестах
 
 ```python
-def test_all_endpoints_have_summary(client):
-    schema = client.get("/openapi.json").json()
+@pytest_asyncio.fixture
+async def client():
+    engine = create_async_engine("sqlite+aiosqlite://", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async_session = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def override():
+        async with async_session() as s: yield s
+
+    app.dependency_overrides[get_db] = override
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+    app.dependency_overrides.clear()
+    await engine.dispose()
+
+@pytest.mark.asyncio
+async def test_create_product(client: AsyncClient):
+    resp = await client.post("/api/products", json={"name": "Widget", "price": 9.99})
+    assert resp.status_code == 201
+    assert resp.json()["name"] == "Widget"
+```
+
+---
+
+## Задача 4. Контрактный тест OpenAPI
+
+```python
+@pytest.mark.asyncio
+async def test_openapi_schema(client: AsyncClient):
+    schema_resp = await client.get("/openapi.json")
+    schema = schema_resp.json()
+
+    # Все эндпоинты имеют summary
     missing = []
     for path, methods in schema["paths"].items():
         for method in methods:
             if "summary" not in methods[method]:
                 missing.append(f"{method.upper()} {path}")
     assert not missing, f"Missing summary: {missing}"
+
+    # Все response_model возвращают 200 или 201
+    for path, methods in schema["paths"].items():
+        for method, details in methods.items():
+            if method in ("post", "put", "patch"):
+                assert "201" in details.get("responses", {}) or "200" in details.get("responses", {}), \
+                    f"{method.upper()} {path} has no 200/201"
 ```
 
-**Что проверяют:** понимание контрактного тестирования, jsonschema, OpenAPI.
+---
+
+## Задача 5. Rate limiter middleware с Redis
+
+```python
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    redis = request.app.state.redis
+    ip = request.client.host if request.client else "unknown"
+    key = f"rl:{ip}:{int(time.time()) // 60}"
+    count = await redis.incr(key)
+    if count == 1: await redis.expire(key, 61)
+    if count > 100:
+        return JSONResponse(status_code=429, detail="Too many requests", headers={"Retry-After": "60"})
+    return await call_next(request)
+```

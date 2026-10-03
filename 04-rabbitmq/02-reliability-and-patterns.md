@@ -1,88 +1,218 @@
 # RabbitMQ: Надёжность и паттерны — глубоко
 
-> **Цель:** понять, как гарантировать, что сообщение **точно дойдёт** до consumer,
-> и как организовать retry + DLX.
+> **Цель:** понимать, как гарантировать, что сообщение **точно дойдёт** до consumer, и как организовать retry.
 
 ---
 
-## 1. Publisher Confirms — как producer узнаёт, что сообщение дошло
+## 1. Три уровня гарантий
+
+```
+Уровень 1 (Producer → Broker): Publisher Confirms
+Уровень 2 (Broker → Consumer): Consumer Ack
+Уровень 3 (Бизнес-уровень):     Outbox Pattern
+```
+
+### Publisher Confirms
 
 ```python
-channel.confirm_delivery()  # включает подтверждения
+# Включаем confirms:
+await channel.confirm_delivery()
 
-def on_confirm(frame):
-    if isinstance(frame, pika.frame.ConfirmFrame):
-        print("Сообщение получено брокером")
-    else:
-        print("Сообщение ПОТЕРЯНО!")
-
-channel.basic_publish(
-    exchange="orders",
-    routing_key="order.created",
-    body=msg,
-    mandatory=True,  # сообщение ТРЕБУЕТ очередь
-)
+# Публикуем:
+try:
+    await channel.default_exchange.publish(
+        aio_pika.Message(
+            body=payload,
+            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+        ),
+        routing_key="order.created",
+        mandatory=True,  # если нет очереди — вернуть PublishError
+    )
+except aio_pika.exceptions.DeliveryError:
+    logger.error("Message NOT delivered to any queue!")
 ```
 
-**Без publisher confirms:** producer отправляет и "забывает". Если брокер упал до записи — сообщение потеряно.
+**Без confirms:** отправили и забыли. Если брокер упал до записи — сообщение потеряно.
 
-**С publisher confirms:** producer ждёт подтверждения от брокера, что сообщение сохранилось (и продублировано на реплики).
+**С confirms:** producer ждёт, что брокер сохранил сообщение (и реплицировал на кворум).
 
----
-
-## 2. Consumer Ack — как consumer сообщает, что обработал
+### Consumer Ack
 
 ```
-Consumer получил → обработал → basic_ack → сообщение удаляется
-                            → basic_nack + requeue=True → возвращается в очередь
-                            → basic_reject + requeue=False → в DLX
+Consumer → получил → обработал → basic.ack      → сообщение удаляется
+                   → ошибка    → basic.nack(requeue=True)  → возвращается в очередь
+                   → фатальная → basic.reject(requeue=False) → DLX
 ```
 
 ```python
-def callback(ch, method, properties, body):
-    try:
-        process_order(body)
-        ch.basic_ack(delivery_tag=method.delivery_tag)  # ✅ успех — удалить
-    except TemporaryError:
-        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)  # повторить
-    except PermanentError:
-        ch.basic_reject(delivery_tag=method.delivery_tag, requeue=False)  # → DLX
+async def callback(message: aio_pika.IncomingMessage):
+    async with message.process():  # автоматический ack/reject
+        try:
+            await process_order(message.body)
+            # process() делает ack автоматически
+        except TemporaryError:
+            raise  # process() отправит nack (requeue)
+        except PermanentError:
+            await message.reject(requeue=False)  # → DLX
 ```
 
-**Важно:** если TCP-соединение упало **без ack**, после таймаута сообщение возвращается в очередь (другой consumer его получит). Это даёт **at-least-once** гарантию.
+**Без ack (auto_ack=True):** consumer получил → сообщение удаляется. Если consumer упал во время обработки — сообщение потеряно.
 
----
+**С ack:** consumer подтверждает **после** обработки. При падении consumer (TCP-разрыв) — сообщение возвращается в очередь.
 
-## 3. Outbox Pattern — гарантия "запись + отправка"
+### Outbox Pattern
 
-**Проблема:** приложение записывает в БД, потом шлёт в RabbitMQ. Если упадёт между ними — сообщение потеряно:
-
+**Проблема:**
 ```
-1. Запись в БД ✅
-2. [CRASH!] → отправка не произошла → сообщение потеряно
+1. INSERT INTO orders (...)    ✅
+2. [CRASH! сервер упал!]       ❌
+3. publish("order.created")   — не выполнилось!
 ```
 
-**Решение (Outbox pattern):**
+**Решение:**
 ```
-1. В той же транзакции: запись в бизнес-таблицу + запись в outbox-таблицу
-2. Фоновый poller читает outbox, отправляет в RabbitMQ
-3. После подтверждения от RMQ — помечает outbox.status = 'done'
-4. При старте — повторяем все pending
+1. BEGIN;
+     INSERT INTO orders (...);
+     INSERT INTO outbox (topic, payload, status='pending');
+   COMMIT;                                    ← атомарно!
+2. Фоновый poller: читает outbox, публикует в RabbitMQ
+3. После publisher-confirm: outbox.status = 'sent'
+4. При старте — повтор pending
 ```
 
 ```sql
 CREATE TABLE outbox (
-    id BIGSERIAL,
+    id BIGSERIAL PRIMARY KEY,
     topic TEXT NOT NULL,
+    routing_key TEXT NOT NULL,
     payload JSONB NOT NULL,
-    status TEXT DEFAULT 'pending',
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending | sent | failed
+    attempts INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    sent_at TIMESTAMPTZ
 );
+
+CREATE INDEX idx_outbox_pending ON outbox(status, created_at)
+    WHERE status = 'pending';
+```
+
+```python
+async def outbox_poller(pool, rmq_channel, batch_size=100, interval=1.0):
+    """Читает outbox, публикует, помечает sent."""
+    while True:
+        async with pool.acquire() as conn:
+            events = await conn.fetch(
+                """SELECT id, topic, routing_key, payload
+                   FROM outbox
+                   WHERE status = 'pending'
+                   ORDER BY created_at
+                   LIMIT $1
+                   FOR UPDATE SKIP LOCKED""",
+                batch_size,
+            )
+            for event in events:
+                try:
+                    exchange = await rmq_channel.get_exchange(event["topic"])
+                    await exchange.publish(
+                        aio_pika.Message(
+                            body=event["payload"].encode(),
+                            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                            message_id=str(event["id"]),
+                        ),
+                        routing_key=event["routing_key"],
+                    )
+                    await conn.execute(
+                        "UPDATE outbox SET status='sent', sent_at=NOW() WHERE id=$1",
+                        event["id"],
+                    )
+                except Exception:
+                    await conn.execute(
+                        "UPDATE outbox SET attempts=attempts+1 WHERE id=$1",
+                        event["id"],
+                    )
+        await asyncio.sleep(interval)
 ```
 
 ---
 
-> **На собесе:** «Как гарантировать доставку в RabbitMQ?» —  
-> «Три уровня: 1) Publisher confirms — producer ждёт, что брокер получил сообщение.
-> 2) Consumer ack — consumer подтверждает обработку. 3) Outbox pattern —
-> атомарная запись в БД + очередь через таблицу outbox. DLX для упавших.»
+## 2. Retry с Exponential Backoff
+
+```
+Сообщение → orders.work (TTL=1s) → если ошибка → reject → DLX
+                                                                     ↓
+                                                          orders.retry (TTL=2s, 4s, 8s...)
+                                                                     ↓
+                                                          orders.dead (после N попыток)
+```
+
+```python
+async def publish_with_retry_headers(channel, event):
+    retry_count = int(event.headers.get("x-retry-count", 0))
+    if retry_count >= 3:
+        # DLQ
+        await channel.default_exchange.publish(
+            aio_pika.Message(body=event.body, headers={"x-error": str(last_error)}),
+            routing_key="orders.dead",
+        )
+    else:
+        delay = 2 ** retry_count  # 1, 2, 4
+        delay_ms = delay * 1000
+        await channel.default_exchange.publish(
+            aio_pika.Message(
+                body=event.body,
+                headers={"x-retry-count": retry_count + 1},
+                expiration=str(delay_ms),  # TTL сообщения
+            ),
+            routing_key="orders.retry",
+        )
+```
+
+---
+
+## 3. Connection resilience
+
+```python
+# connect_robust — reconnect автоматически:
+connection = await aio_pika.connect_robust(
+    "amqp://user:pass@localhost/vhost",
+    reconnect_interval=1.0,   # начальный интервал
+    reconnect_max_interval=30.0,  # максимальный интервал (backoff)
+)
+
+# Health check:
+async def health_check(connection) -> bool:
+    try:
+        channel = await connection.channel()
+        await channel.close()
+        return True
+    except Exception:
+        return False
+```
+
+---
+
+## 4. Мониторинг
+
+```bash
+# Размер очередей
+rabbitmqctl list_queues name messages messages_ready messages_unacknowledged
+
+# Статистика exchange
+rabbitmqctl list_exchanges name type
+
+# Connections
+rabbitmqctl list_connections name state peer_host
+
+# В целом
+rabbitmq-diagnostics status
+rabbitmq-diagnostics check_alarms
+```
+
+---
+
+> **На собесе:** «Как гарантировать доставку в RabbitMQ?» —
+> «Три уровня:
+> 1) Publisher confirms — producer подтверждает, что брокер получил.
+> 2) Consumer ack — consumer подтверждает, что обработал.
+> 3) Outbox pattern — атомарная запись в БД + очередь (решает проблему «записал в БД, но не отправил»).
+> DMQ для упавших с retry + exponential backoff. Quorum queues для критичных данных (RAFT-консенсус).»

@@ -1,94 +1,133 @@
-# Задачи RabbitMQ / Kafka — расширенный разбор
+# Задачи RabbitMQ / Kafka — 5 задач с разбором
 
 ---
 
-## Задача 1. Outbox pattern
+## Задача 1. Outbox pattern (полная реализация)
 
-**Условие:** Опишите реализацию Outbox pattern для гарантии, что сообщение не потеряется между записью в БД и отправкой в RabbitMQ/Kafka.
+**Проблема:** сервер записал в БД, но упал до отправки в очередь → сообщение потеряно.
 
-**Проблема:** Приложение записывает в БД, потом отправляет в очередь. Если упадёт между ними — сообщение потеряно.
-
-**Решение (Outbox pattern):**
-1. В **одной транзакции** с бизнес-записью создаём запись в таблице `outbox`:
-
+**Решение:**
 ```sql
+-- В ОДНОЙ транзакции:
 BEGIN;
-  INSERT INTO orders (...);
-  INSERT INTO outbox (topic, payload, status) VALUES ('order.created', '{...}', 'pending');
+  INSERT INTO orders (...) VALUES (...);
+  INSERT INTO outbox (topic, routing_key, payload, status) VALUES ('orders', 'order.created', '{}', 'pending');
 COMMIT;
 ```
 
-2. Фоновый poller читает `outbox WHERE status = 'pending'`:
-
 ```python
-async def outbox_poller(rabbit):
+async def outbox_poller(pool, rmq_exchange, batch_size=100):
     while True:
-        events = await outbox_repo.get_pending(limit=100)
-        for event in events:
-            try:
-                await rabbit.publish(event.topic, event.payload)
-                await outbox_repo.mark_done(event.id)
-            except Exception:
-                logger.warning(f"Outbox event {event.id} failed, will retry")
+        async with pool.acquire() as conn:
+            events = await conn.fetch(
+                """SELECT id, routing_key, payload FROM outbox
+                   WHERE status='pending' ORDER BY created_at LIMIT $1
+                   FOR UPDATE SKIP LOCKED""", batch_size)
+            for e in events:
+                await rmq_exchange.publish(
+                    aio_pika.Message(body=e["payload"].encode(), delivery_mode=PERSISTENT),
+                    routing_key=e["routing_key"])
+                await conn.execute("UPDATE outbox SET status='sent', sent_at=NOW() WHERE id=$1", e["id"])
         await asyncio.sleep(1)
 ```
 
-3. **При старте приложения** — повторить все pending.
-
-**Гарантии:** Outbox + RabbitMQ publisher confirms = сообщение точно дойдёт.
+**Гарантии:** outbox + publisher confirms = сообщение точно дойдёт.
 
 ---
 
-## Задача 2. Consumer retry с DLQ
-
-**Условие:** Consumer для Kafka, который при ошибке пытается 3 раза обработать сообщение, а потом отправляет в DLQ.
+## Задача 2. Consumer retry с DLQ (Kafka)
 
 ```python
 async def process_with_retry():
-    consumer = AIOKafkaConsumer("orders", bootstrap_servers="localhost:9092", group_id="processor")
-    producer = AIOKafkaProducer(bootstrap_servers="localhost:9092")
-    await consumer.start()
-    await producer.start()
-
+    consumer = AIOKafkaConsumer("orders", group_id="processor", enable_auto_commit=False)
+    producer = AIOKafkaProducer()
+    await consumer.start(); await producer.start()
     try:
         async for msg in consumer:
-            retries = msg.headers.get("x-retries", 0)
+            retries = int(msg.headers.get("x-retries", "0"))
             try:
                 await handle(msg.value)
                 await consumer.commit()
-            except Exception as e:
+            except TemporaryError:
                 if retries < 3:
-                    await producer.send("orders-retry", value=msg.value, headers={"x-retries": retries + 1})
-                    await consumer.commit()
+                    await producer.send("orders-retry", value=msg.value,
+                        headers=[("x-retries", str(retries+1).encode())])
                 else:
-                    await producer.send("orders-dlq", value=msg.value, headers={"error": str(e)})
-                    await consumer.commit()
+                    await producer.send("orders-dlq", value=msg.value)
+                await consumer.commit()  # ВСЕГДА коммитим!
+            except PermanentError:
+                await producer.send("orders-dlq", value=msg.value)
+                await consumer.commit()
     finally:
-        await consumer.stop()
-        await producer.stop()
+        await consumer.stop(); await producer.stop()
 ```
 
-**Ключевое:** мы коммитим offset даже при ошибке — чтобы не блокировать чтение новых сообщений. Упавшее уходит в retry-топик.
+**Ключевое:** коммитим offset всегда, чтобы не блокировать partition.
 
 ---
 
 ## Задача 3. RabbitMQ vs Kafka — проектирование нотификаций
 
-**Условие:** Спроектируйте сервис нотификаций. Пользователь совершает действие → нужно отправить email и push-уведомление.
+**Требование:** действие → email + push-уведомление.
 
-**Выбор:** RabbitMQ (сообщение нужно доставить 1 раз).
+**Выбор: RabbitMQ.**
+- Сообщение доставить 2 обработчикам: email и push (Fanout exchange)
+- Ack: email-сервис подтверждает отправку
+- DLX: для ошибок (повторная попытка)
+- Не нужна история — после отправки сообщение не нужно
 
 **Архитектура:**
-
 ```
-FastAPI → Exchange "notifications" → Queue "email" → Worker (send email)
-                                   → Queue "push"  → Worker (send push)
+FastAPI → Exchange(notifications, fanout) → Queue "email" → Worker Email
+                                           → Queue "push"  → Worker Push
 ```
 
-**Почему RabbitMQ, а не Kafka:**
-- Сообщение прочтётся 1 раз (email worker + push worker) — не нужно хранить историю
-- Нужно подтверждение (ack) от email-сервиса
-- DLX для ошибок (повторная отправка)
-- Простота: Fanout exchange решит задачу
+**Когда выбрали бы Kafka:** если нужен аудит нотификаций (кто, когда получил) или несколько consumer-групп читают одни и те же события.
 
-**Когда выбрали бы Kafka:** если нужен аудит (кто когда получил нотификацию).
+---
+
+## Задача 4. Idempotent consumer (дедупликация)
+
+```python
+async def idempotent_handle(msg, redis: Redis):
+    # topic + partition + offset уникален для каждого сообщения в Kafka
+    dedup_key = f"dedup:{msg.topic}:{msg.partition}:{msg.offset}"
+    if await redis.exists(dedup_key):
+        logger.info(f"Skipping duplicate: {dedup_key}")
+        return
+    await process(msg.value)
+    await redis.setex(dedup_key, 86400, "1")  # храним 24 часа
+```
+
+---
+
+## Задача 5. Graceful shutdown consumer
+
+```python
+async def consume_with_graceful_shutdown():
+    consumer = AIOKafkaConsumer("orders", ...)
+    await consumer.start()
+    shutdown = asyncio.Event()
+
+    async def handle_shutdown():
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(set_shutdown()))
+        async def set_shutdown():
+            logger.info("Shutdown signal received")
+            shutdown.set()
+        await handle_shutdown()
+
+    try:
+        while not shutdown.is_set():
+            # poll с коротким таймаутом чтобы проверять shutdown
+            data = await consumer.getmany(timeout_ms=1000)
+            for tp, messages in data.items():
+                for msg in messages:
+                    await process(msg.value)
+                    await consumer.commit()
+    finally:
+        logger.info("Stopping consumer...")
+        await consumer.stop()
+        logger.info("Consumer stopped")
+```

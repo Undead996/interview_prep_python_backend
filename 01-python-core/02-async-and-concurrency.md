@@ -1,59 +1,111 @@
-# Async и конкурентность в Python — глубоко с внутренним устройством
+# Async и конкурентность в Python — от GIL до event loop
 
-> **Цель:** понять, как async/await работает под капотом на уровне Python/C,
-> и обоснованно выбирать asyncio vs threading vs multiprocessing под задачу.
+> **Цель:** понять, как работает async/await под капотом CPython, и **обоснованно** выбирать asyncio vs threading vs multiprocessing под задачу.
 
 ---
 
-## 1. GIL — почему он есть и как его обойти
+## 1. GIL — Global Interpreter Lock
 
-### Что такое GIL на уровне C CPython
+### Что такое GIL на уровне C в CPython
 
-CPython написан на C. Глобальный интерпретатор (Python-код) работает через `ceval.c` — цикл исполнения байткода. Без GIL каждое чтение/запись в `PyObject` (абстракция "питоновского объекта") требовала бы блокировки. Это замедлило бы однопоточный код на **2–4x**.
+**Простыми словами:** GIL — это «ключ», который разрешает только одному потоку исполнять Python-код в каждый момент времени. Это как касса в супермаркете: сколько бы ни было покупателей (потоков), обслуживается всегда только один.
 
-**GIL — это trade-off:**
-- **+** однопоточный код быстр, C-расширения (numpy, pandas, Pillow) могут отпускать GIL и быть потокобезопасными бесплатно  
-- **−** Python-потоки не дают прироста для CPU-bound кода
+**Технически:** CPython написан на C. Основной цикл исполнения байткода расположен в `ceval.c`. Без GIL каждое чтение/запись полей `PyObject` требовало бы отдельной блокировки, что замедлило бы однопоточный код в 2–4 раза. GIL — это **trade-off**:
 
-### Что GIL НЕ блокирует
+| Плюсы GIL | Минусы GIL |
+|-----------|-----------|
+| Однопоточный код быстр (нет per-object блокировок) | Python-потоки не дают прироста для CPU-bound |
+| C-расширения (numpy, pandas) могут просто отпустить GIL (`Py_BEGIN_ALLOW_THREADS`) и быть потокобезопасными | Нагрузка на CPU в одном процессе не масштабируется |
+| Упрощает GC (нет гонок при подсчёте ссылок) | — |
 
-| Операция | Блокирует? | Почему |
-|----------|-----------|--------|
-| Python-код | ✅ Каждый байткод под GIL | Защита структур CPython |
-| `socket.recv()`, `file.read()` | ❌ GIL отпускается на I/O | I/O — вне Python, ждёт ОС |
-| `time.sleep()` | ❌ GIL отпускается на сон | Таймер ядра ОС |
-| `numpy.dot()` | ❌ GIL отпускается | C-расширение использует `Py_BEGIN_ALLOW_THREADS` |
-| asyncio event loop | ❌ Один поток, нет GIL-проблем | Coroutine switching — кооперативный |
+### Что GIL блокирует, а что — нет
 
-### Практическое правило
+| Операция | Блокирует GIL? | Почему |
+|----------|---------------|--------|
+| Python-код (`a = b + c`) | ✅ Да | Исполняется в `ceval.c` |
+| `socket.recv()` | ❌ Нет | GIL отпускается перед системным вызовом |
+| `file.read()` | ❌ Нет | GIL отпускается на время I/O |
+| `time.sleep()` | ❌ Нет | GIL отпускается, таймер — в ядре ОС |
+| `numpy.dot()` | ❌ Нет | C-расширение использует `Py_BEGIN_ALLOW_THREADS` |
+| asyncio event loop | ❌ Нет (один поток!) | Корутинное переключение — кооперативное, без GIL |
+| `json.loads()` (чистый Python) | ✅ Да | Парсинг — Python-код |
+
+### Практическое правило выбора
+
+```
+CPU-bound   (нагрузка на процессор)      → multiprocessing
+I/O-bound   (сеть, диск, ожидание)      → asyncio (или threading для legacy-библиотек)
+Смешанное   (CPU + I/O)                 → asyncio + ProcessPoolExecutor
+```
+
+### Как обойти GIL
 
 ```python
-# CPU-bound — не используй threading, используй multiprocessing
+# 1. Multiprocessing — каждый процесс имеет СВОЙ GIL
 from multiprocessing import Pool
 
-# I/O-bound — asyncio (или threading для синхронных библиотек)
+def cpu_intensive(n: int) -> int:
+    return sum(i * i for i in range(n))
+
+with Pool(processes=4) as pool:
+    results = pool.map(cpu_intensive, [1_000_000] * 8)
+
+# 2. C-расширения — отпускают GIL
+import numpy as np
+# numpy работает на C и отпускает GIL во время вычислений
+a = np.random.randn(10000, 10000)
+b = a @ a.T  # GIL отпущен, могут работать другие потоки
+
+# 3. asyncio — не использует потоки вообще
 import asyncio
 
-# Смешанный — asyncio + ProcessPoolExecutor для CPU-кусков
+async def io_bound(url: str):
+    # httpx.AsyncClient работает на asyncio — GIL не проблема
+    async with httpx.AsyncClient() as client:
+        return await client.get(url)
 ```
 
 ---
 
-## 2. asyncio vs threading vs multiprocessing — когда что
+## 2. asyncio vs threading vs multiprocessing
 
-| Сценарий | asyncio | threading | multiprocessing |
-|----------|---------|-----------|-----------------|
-| Web-сервер (FastAPI) | ✅ | ❌ | ❌ |
-| Парсинг 1000 сайтов | ✅ | ❌ | ❌ |
-| Старая синхронная библиотека (requests) | ❌ | ✅ | ❌ |
-| Обработка изображений (CPU) | ❌ | ❌ | ✅ |
-| Микросервис с 10k WebSocket | ✅ | ❌ | ❌ |
-| Научные расчёты | ❌ | ❌ | ✅ |
+### Детальная сравнительная таблица
 
-**Почему asyncio лучше threading для I/O-bound:**
-- Корутина весит ~1KB, поток ~2MB (можно иметь 10k корутин, но не 10k потоков)
-- Переключение корутин — 0.1μs, переключение потоков — 1μs (ОС-оверхед)
-- Нет гонок за общие данные (нет Lock/RLock/Semaphore — код проще)
+| Характеристика | asyncio | threading | multiprocessing |
+|---------------|---------|-----------|-----------------|
+| **Единица исполнения** | Корутина (~1KB) | Поток (~2MB стека) | Процесс (отдельный GIL) |
+| **Максимум одновременно** | ~100 000 (в одном потоке) | ~100 (ограничение ОС) | ~N CPU ядер |
+| **Переключение** | Кооперативное (по `await`), ~0.1μs | Вытесняющее (ОС), ~1μs | Вытесняющее (ОС), ~100μs |
+| **Общая память** | ✅ Один поток — нет гонок | ✅ Но нужны Lock/RLock/Semaphore | ❌ Каждый процесс — своя память |
+| **GIL** | Не проблема (1 поток) | Проблема для CPU-bound | Не проблема (свой GIL) |
+| **Обработка ошибок** | `try/except` вокруг `await` | `try/except` в run() | `try/except` в target |
+
+### Когда что выбирать — практические примеры
+
+```python
+# ✅ asyncio — web-сервер (FastAPI), 10k WebSocket, парсинг сайтов
+@app.get("/users")
+async def get_users(db: AsyncSession = Depends(get_db)):
+    return await db.execute(select(User))
+
+# ✅ threading — старая синхронная библиотека без async-версии
+def call_legacy_soap(url: str) -> dict:
+    # библиотека не-async, но I/O-bound
+    return legacy_soap_client.call(url)
+
+async def wrapper(url: str):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, call_legacy_soap, url)
+
+# ✅ multiprocessing — обработка изображений, ML-инференс
+def resize_image(path: str) -> bytes:
+    img = Image.open(path)
+    return img.resize((256, 256)).tobytes()
+
+with ProcessPoolExecutor(max_workers=4) as executor:
+    futures = [executor.submit(resize_image, path) for path in images]
+    results = [f.result() for f in futures]
+```
 
 ---
 
@@ -61,116 +113,341 @@ import asyncio
 
 ### Что происходит при `await`
 
+**Простыми словами:** `await` — это как нажать на «паузу» в видеоигре. Игра (корутина) ставится на паузу, а процессор идёт играть в другую игру. Через какое-то время первая игра «размораживается» и продолжается ровно с того же места.
+
 ```python
-async def fetch():
-    # 1. Python создаёт объект coroutine (машина состояний)
-    # 2. При await asyncio.sleep(1):
-    #    a. Корутина доходит до await, вызывает `__await__`
-    #    b. Создаётся Future/Task в event loop
-    #    c. Event loop регистрирует таймер: через 1 секунду
-    #    d. Управление возвращается event loop'у
-    # 3. Event loop выбирает следующую корутину из _ready
-    # 4. Через 1с event loop кладёт эту корутину обратно в _ready
-    # 5. Корутина просыпается, получает результат from await
-    await asyncio.sleep(1)
-    return 42
+async def fetch_data():
+    # 1. Python создаёт coroutine-object
+    # 2. Дошли до await — корутина приостанавливается
+    # 3. Event loop регистрирует таймер/сокет
+    # 4. Управление возвращается event loop'у
+    # 5. Event loop выбирает следующую готовую корутину
+    # 6. Когда данные получены/таймер истёк — эту корутину кладут обратно в _ready
+    # 7. Корутина продолжается со следующей после await строки
+    data = await http_client.get("/api/data")
+    return data
+
+# Под капотом — это машина состояний:
+# 1. __init__ → начальное состояние
+# 2. __await__ → создаёт Future
+# 3. send(None) → выполняет до первого await
+# 4. send(result) → возобновляет после await с результатом
 ```
 
 ### Типы event loop на разных ОС
 
-| ОС | Механизм | Имплементация |
-|----|----------|--------------|
-| Linux | `epoll` | `SelectorEventLoop` (по умолчанию) |
-| macOS | `kqueue` | `SelectorEventLoop` |
-| Windows | `IOCP` | `ProactorEventLoop` (используется в asyncio.run()) |
+| ОС | Механизм | Event Loop | Примечание |
+|----|----------|-----------|------------|
+| Linux | `epoll` | `SelectorEventLoop` | По умолчанию |
+| macOS | `kqueue` | `SelectorEventLoop` | По умолчанию |
+| Windows | `IOCP` | `ProactorEventLoop` | Используется в `asyncio.run()` |
+
+```python
+# Можно выбрать явно:
+import asyncio
+import sys
+
+if sys.platform == "win32":
+    loop = asyncio.ProactorEventLoop()
+    asyncio.set_event_loop(loop)
+```
 
 ### run_in_executor — мост между sync и async
 
 ```python
-async def call_legacy_api(url: str) -> dict:
+import asyncio
+import time
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+
+# Синхронная CPU-bound функция
+def cpu_heavy(n: int) -> int:
+    return sum(i * i for i in range(n))
+
+async def main():
     loop = asyncio.get_running_loop()
-    # Выполняет requests.get в ThreadPoolExecutor
-    # GIL отпускается на время I/O, event loop не блокируется
-    response = await loop.run_in_executor(
-        None,  # default ThreadPoolExecutor
-        requests.get, url
+
+    # ThreadPoolExecutor — для I/O-bound (GIL отпускается на I/O)
+    result = await loop.run_in_executor(None, time.sleep, 1)  # default executor
+
+    # ProcessPoolExecutor — для CPU-bound
+    with ProcessPoolExecutor() as pool:
+        result = await loop.run_in_executor(pool, cpu_heavy, 10_000_000)
+```
+
+---
+
+## 4. Корутины, Tasks, Futures — что есть что
+
+| Объект | Что это | Когда использовать |
+|--------|--------|-------------------|
+| **Coroutine** | Объект-генератор, созданный из `async def` | Почти никогда напрямую — всегда `await` или `create_task` |
+| **Task** | Корутина, запланированная в event loop | Для фоновых задач, параллельного исполнения |
+| **Future** | Низкоуровневое «обещание» результата | Для callback-based API, редко используется напрямую |
+
+```python
+import asyncio
+
+async def worker(n: int) -> int:
+    await asyncio.sleep(0.1)
+    return n * 2
+
+async def main():
+    # Coroutine — сама не выполняется
+    coro = worker(5)
+    print(type(coro))  # <class 'coroutine'>
+
+    # Task — выполняется в event loop
+    task = asyncio.create_task(worker(3))
+    print(type(task))  # <class 'Task'>
+    result = await task  # дождаться Task
+    print(result)       # 6
+
+    # Future — низкоуровневое (редко используется напрямую)
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+
+    # Кто-то должен установить результат:
+    loop.call_later(0.5, future.set_result, 42)
+    result = await future
+    print(result)  # 42
+
+asyncio.run(main())
+```
+
+---
+
+## 5. gather / TaskGroup / wait / as_completed
+
+### gather — конкурентный запуск всех задач
+
+```python
+async def fetch_url(url: str) -> str:
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url)
+        return f"{url}: {resp.status_code}"
+
+async def main():
+    urls = ["https://httpbin.org/get"] * 3
+
+    # Без return_exceptions — одна ошибка убивает все задачи!
+    results = await asyncio.gather(
+        *[fetch_url(url) for url in urls],
+        return_exceptions=True  # ← всегда ставь!
     )
-    return response.json()
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            print(f"URL {i} failed: {result}")
+        else:
+            print(f"URL {i}: {result}")
+```
+
+### TaskGroup (Python 3.11+) — structured concurrency
+
+```python
+async def main():
+    async with asyncio.TaskGroup() as tg:
+        task1 = tg.create_task(worker(1))
+        task2 = tg.create_task(worker(2))
+        task3 = tg.create_task(worker(3))
+    # Все задачи завершены (или одна упала → остальные отменены)
+    print(task1.result(), task2.result(), task3.result())
+```
+
+**TaskGroup vs gather:**
+- `TaskGroup` — structured concurrency: если одна задача упала → остальные отменяются
+- `gather` — можно `return_exceptions=True` и обработать ошибки
+
+### as_completed — обрабатывать по мере готовности
+
+```python
+async def main():
+    tasks = [asyncio.create_task(worker(i)) for i in range(5)]
+
+    for coro in asyncio.as_completed(tasks):
+        result = await coro  # получаем результат ПЕРВОЙ завершившейся
+        print(f"Got result: {result}")
 ```
 
 ---
 
-## 4. Корутины, Tasks, Futures — разница на практике
-
-```python
-coro = my_coro()                    # Coroutine (объект-генератор)
-task = asyncio.create_task(coro)    # Task (планирует в event loop)
-future = loop.create_future()       # Future (только результат)
-```
-
-| Объект | Что делает | Когда использовать |
-|--------|-----------|-------------------|
-| **Coroutine** | Вычисляется при `await` | Внутри async def, прячется за create_task |
-| **Task** | Планирует, можно отменить, ждать | Для фоновых задач |
-| **Future** | Низкоуровневое обещание | Для callback-based API (редко) |
-
-```python
-# Пример Future с callback
-def on_done(future):
-    print(future.result())
-
-future = loop.create_future()
-future.add_done_callback(on_done)
-loop.call_later(1, future.set_result, 42)
-```
-
----
-
-## 5. Producer-Consumer с asyncio.Queue
+## 6. Producer-Consumer с asyncio.Queue + Semaphore
 
 Этот паттерн — основа любого queue-based микросервиса:
 
 ```python
-async def worker(name: str, queue: asyncio.Queue):
+import asyncio
+from asyncio import Queue, Semaphore
+
+async def worker(name: str, queue: Queue, sem: Semaphore):
+    """Обрабатывает задачи из очереди с ограничением конкурентности."""
     while True:
         item = await queue.get()
-        if item is None:
+        if item is None:  # сигнал завершения
             queue.task_done()
             break
-        print(f"[{name}] processing {item}")
-        await asyncio.sleep(0.1)
+        async with sem:
+            print(f"[{name}] processing {item}")
+            await asyncio.sleep(0.1)  # имитация работы
         queue.task_done()
 
 async def main():
-    queue = asyncio.Queue(maxsize=100)
-    workers = [asyncio.create_task(worker(f"W{i}", queue)) for i in range(3)]
-    
+    queue: Queue[str | None] = Queue(maxsize=100)
+    sem = Semaphore(3)  # не более 3 одновременных обработок
+
+    # Запускаем 5 workers
+    workers = [asyncio.create_task(worker(f"W{i}", queue, sem)) for i in range(5)]
+
+    # Producer: кладём задачи
     for i in range(20):
         await queue.put(f"task-{i}")
-    
+
+    # Сигнал остановки для каждого worker
     for _ in workers:
-        await queue.put(None)  # сигнал остановки
-    
+        await queue.put(None)
+
+    # Ждём завершения всех workers
     await asyncio.gather(*workers)
+    print("All done")
+
+asyncio.run(main())
 ```
 
 ---
 
-## 6. Типичные подводные камни (на собесе)
+## 7. Примитивы синхронизации в asyncio
 
-| ❌ Ошибка | Почему | ✅ Как правильно |
-|-----------|--------|-----------------|
-| `time.sleep(1)` в `async def` | Блокирует весь event loop на 1s! | `await asyncio.sleep(1)` |
-| `requests.get()` в `async def` | Блокирует event loop на I/O | `httpx.AsyncClient()` или `run_in_executor` |
-| `gather` без `return_exceptions` | Одна ошибка убивает все задачи | `gather(…, return_exceptions=True)` |
-| `asyncio.run()` внутри `async def` | RuntimeError: другой loop запущен | `await task` |
-| Создал корутину, но не `await` | RuntimeWarning, код не выполнен | `await` или `create_task` |
+```python
+import asyncio
+
+# Lock — аналог threading.Lock (взаимное исключение)
+lock = asyncio.Lock()
+
+async def critical_section(data: dict):
+    async with lock:
+        data["counter"] += 1
+
+# Semaphore — ограничение конкурентности
+sem = asyncio.Semaphore(10)  # не более 10 одновременных вызовов
+
+async def rate_limited_request(url: str):
+    async with sem:
+        return await http_client.get(url)
+
+# Event — сигнал (один поток ждёт, другой подаёт)
+event = asyncio.Event()
+
+async def waiter():
+    print("Waiting...")
+    await event.wait()  # блокируется до event.set()
+    print("Got signal!")
+
+async def signaler():
+    await asyncio.sleep(1)
+    event.set()  # разблокировать всех waiter'ов
+
+# Condition — сложная координация
+cond = asyncio.Condition()
+buffer: list[int] = []
+
+async def producer():
+    for i in range(5):
+        async with cond:
+            buffer.append(i)
+            cond.notify()
+
+async def consumer():
+    while True:
+        async with cond:
+            await cond.wait_for(lambda: len(buffer) > 0)
+            item = buffer.pop(0)
+            print(f"Consumed: {item}")
+```
 
 ---
 
-> **На собесе:** «Расскажите, как работает asyncio» —  
-> «asyncio — это событийный цикл (event loop), который исполняет корутины.
-> Корутина — функция, которая может приостанавливаться через `await`, отдавая
-> управление event loop'у. Event loop использует epoll/kqueue/IOCP для
-> неблокирующего I/O. В одном потоке могут работать тысячи корутин.
-> GIL не проблема — он отпускается на время I/O.»
+## 8. Типичные подводные камни (с примерами и объяснением)
+
+### ❌ Ошибка 1: `time.sleep()` в async-функции
+
+```python
+async def bad_polling():
+    while True:
+        data = await fetch()
+        time.sleep(5)  # ❌ БЛОКИРУЕТ ВЕСЬ EVENT LOOP на 5 секунд!
+
+async def good_polling():
+    while True:
+        data = await fetch()
+        await asyncio.sleep(5)  # ✅ отпускает управление
+```
+
+### ❌ Ошибка 2: `requests.get()` в async-функции
+
+```python
+# ❌ requests — синхронный, блокирует event loop
+async def bad_fetch(url: str):
+    return requests.get(url).json()
+
+# ✅ httpx — async-native
+async def good_fetch(url: str):
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url)
+        return resp.json()
+
+# ✅ run_in_executor для legacy-библиотек
+async def okay_fetch(url: str):
+    loop = asyncio.get_running_loop()
+    resp = await loop.run_in_executor(None, requests.get, url)
+    return resp.json()
+```
+
+### ❌ Ошибка 3: `gather()` без `return_exceptions`
+
+```python
+async def may_fail(n: int) -> int:
+    if n == 3:
+        raise ValueError("Bad number!")
+    return n * 2
+
+# ❌ Одна ошибка — все остальные задачи отменяются
+results = await asyncio.gather(*[may_fail(i) for i in range(5)])
+# RuntimeError!
+
+# ✅ Ошибки возвращаются как значения
+results = await asyncio.gather(
+    *[may_fail(i) for i in range(5)],
+    return_exceptions=True
+)
+# [0, 2, 4, ValueError("Bad number!"), 8]
+```
+
+### ❌ Ошибка 4: не `await` корутину
+
+```python
+async def main():
+    fetch_data()  # ❌ RuntimeWarning: coroutine was never awaited
+    # Правильно:
+    await fetch_data()         # ждать
+    asyncio.create_task(fetch_data())  # или фоновая задача
+```
+
+### ❌ Ошибка 5: `asyncio.run()` внутри `async def`
+
+```python
+async def inner():
+    return 42
+
+async def outer():
+    result = asyncio.run(inner())  # ❌ RuntimeError: event loop already running
+    # Правильно:
+    result = await inner()
+```
+
+---
+
+> **На собесе:** «Расскажите, как работает asyncio» —
+> «asyncio — это событийный цикл, который кооперативно переключает корутины.
+> Корутина приостанавливается через `await`, отдавая управление event loop'у.
+> Event loop использует epoll/kqueue/IOCP для неблокирующего I/O.
+> В одном потоке работают тысячи корутин. GIL не проблема — он отпускается на I/O.
+> Для CPU-bound используем multiprocessing или run_in_executor с ProcessPoolExecutor.»

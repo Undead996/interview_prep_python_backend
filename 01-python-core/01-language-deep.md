@@ -1,93 +1,117 @@
-# Python Language Deep Dive — расширенный разбор
+# Python Language Deep Dive — полный разбор с примерами
 
-> **Цель файла:** понять ***почему*** Python устроен так, а не иначе. Не просто "список immutable", а "почему tuple можно ключом dict, а list нет".
+> **Цель файла:** понять ***почему*** Python устроен так, а не иначе. Не «список immutable-типов», а «почему tuple можно ключом dict, а list нет». С level-C объяснением под капотом.
 
 ---
 
 ## 1. Типы данных и изменяемость (mutability)
 
-### Почему это вообще важно на собесе?
+### Почему это важно на собесе?
 
-Потому что mutability влияет на **всё**: от производительности до багов. На собесе проверяют не знание таблицы immutable vs mutable, а понимание **последствий**.
+Mutability влияет на **всё**: от производительности до трудноуловимых багов. На собесе проверяют не запоминание таблицы, а понимание **последствий**. Типичный вопрос:
+
+> «Почему list нельзя использовать как ключ в dict?»
 
 ### Что такое mutability на уровне памяти
 
+**Простыми словами:** immutable-объект — как надпись на камне: нельзя исправить, можно только высечь новую. Mutable-объект — как доска: можно дописывать и стирать.
+
 ```python
+# Mutable: две переменные указывают на ОДИН объект
 a = [1, 2, 3]
-b = a          # b — не копия, а ссылка на ТОТ ЖЕ объект
+b = a               # b — НЕ копия, а та же ссылка
 b.append(4)
-print(a)       # [1, 2, 3, 4] — a изменился!
+print(a)            # [1, 2, 3, 4] — a тоже изменился!
+print(a is b)       # True — это один и тот же объект
+
+# Immutable: «модификация» создаёт новый объект
+x = "hello"
+y = x
+y += " world"       # создаётся НОВАЯ строка
+print(x)            # "hello" — x не изменилась
+print(x is y)       # False — разные объекты
 ```
 
-Когда вы пишете `b = a` для mutable-объекта, Python **не копирует данные**. Он копирует ссылку. Оба имени указывают на один и тот же объект в памяти.
+**Технически:** Каждое имя в Python — это ссылка на `PyObject` в куче. При `b = a` для mutable-типа копируется **указатель**, а не данные. Оба имени указывают на один и тот же участок памяти. При изменении через любое из имён — меняется один и тот же объект.
 
-Для immutable-объектов это не имеет значения, потому что объект нельзя изменить — любая "модификация" создаёт новый объект.
+### Полная таблица типов
+
+| Тип | Mutable? | Hashable (ключ dict)? | Где хранится | Примечание |
+|-----|----------|----------------------|-------------|------------|
+| `int` | ❌ | ✅ | Внутри PyObject как значение | CPython кэширует -5..256 |
+| `float` | ❌ | ✅ | Внутри PyObject | NaN-ы не равны друг другу! |
+| `str` | ❌ | ✅ | Внутри PyObject | Intern-строки (короткие, без пробелов) |
+| `bytes` | ❌ | ✅ | Внутри PyObject | Как str, но байты |
+| `bool` | ❌ | ✅ | True=1, False=0 (подкласс int!) | `isinstance(True, int)` → True |
+| `tuple` | ❌ | ✅ (если все элементы hashable) | Ссылки на элементы | Если внутри list — НЕ hashable |
+| `frozenset` | ❌ | ✅ | Хэш-таблица | Неизменяемый set |
+| `list` | ✅ | ❌ | Динамический массив указателей | `list.append()` — O(1) амортизированно |
+| `dict` | ✅ | ❌ | Хэш-таблица | Ключи — hashable |
+| `set` | ✅ | ❌ | Хэш-таблица | Только hashable элементы |
+| `bytearray` | ✅ | ❌ | Массив байтов | Mutable-версия bytes |
+
+### Провальная зона: tuple с mutable элементом
 
 ```python
-a = "hello"
-b = a
-b += " world"  # создаётся НОВАЯ строка, a не изменилась
-print(a)       # "hello"
+t = (1, [2, 3])
+
+# Сам tuple изменить нельзя:
+# t[1] = [4]   # ❌ TypeError: 'tuple' object does not support item assignment
+
+# Но список ВНУТРИ tuple изменить МОЖНО:
+t[1].append(4)  # ✅ работает
+print(t)        # (1, [2, 3, 4]) — tuple "изменился"!
+
+# Такой tuple НЕЛЬЗЯ ключом dict:
+d = {t: "value"}  # ❌ TypeError: unhashable type: 'list'
 ```
 
-### Детальная таблица
+**Почему?** Хэш tuple вычисляется как `hash(tuple) = hash((hash(e1), hash(e2), ...))`. Если e2 — list (unhashable), то и весь tuple — unhashable. Python проверяет это на этапе вставки в dict.
 
-| Тип | Изменяемый? | Можно ключом dict? | Хранится в |
-|-----|------------|-------------------|------------|
-| `int` | ❌ | ✅ | Значение |
-| `float` | ❌ | ✅ | Значение |
-| `str` | ❌ | ✅ | Значение |
-| `bool` | ❌ | ✅ | Значение (True=1, False=0!) |
-| `tuple` | ❌ | ✅ (если все элементы immutable) | Ссылки на элементы |
-| `frozenset` | ❌ | ✅ | Значение |
-| `bytes` | ❌ | ✅ | Значение |
-| `list` | ✅ | ❌ | Ссылка |
-| `dict` | ✅ | ❌ | Ссылка |
-| `set` | ✅ | ❌ | Ссылка |
-| `bytearray` | ✅ | ❌ | Ссылка |
-
-### Провальная зона: tuple с mutable элементами
+### Практические примеры из бэкенда
 
 ```python
-t = (1, [2, 3])   # tuple, но внутри него список
-# t[1] = [4]      # ❌ TypeError — tuple immutable
-t[1].append(4)     # ✅ работает — мы изменили список, а не tuple
-# Такой tuple нельзя ключом dict!
-d = {t: "value"}   # ❌ TypeError: unhashable type: 'list'
-```
+# ❌ Ошибка 1: дефолтный список в параметре (см. pitfalls)
+def process(items, processed=[]):
+    processed.append(items)
+    return processed
 
-**Почему?** Потому что хэш tuple вычисляется на основе хэшей его элементов. Если элемент изменится — хэш перестанет быть актуальным. Python запрещает использовать unhashable типы как ключи dict.
+# ❌ Ошибка 2: изменение объекта, переданного как параметр
+def add_user_role(user: dict, role: str) -> dict:
+    user["roles"].append(role)  # меняет переданный dict!
+    return user
 
-### Практический пример: словарь со счётчиками
-
-```python
-# ❌ Плохо — mutable default (разберём ниже)
-def count_words(text, counts={}):
-    for word in text.split():
-        counts[word] = counts.get(word, 0) + 1
-    return counts
-
-# ✅ Хорошо
-def count_words(text, counts=None):
-    if counts is None:
-        counts = {}
-    for word in text.split():
-        counts[word] = counts.get(word, 0) + 1
-    return counts
+# ✅ Правильно: копируем или используем immutable
+def add_user_role(user: dict, role: str) -> dict:
+    return {**user, "roles": [*user["roles"], role]}  # новый dict
 ```
 
 ---
 
 ## 2. ООП и MRO (Method Resolution Order)
 
-### Зачем МRO вообще нужно?
+### Зачем MRO вообще нужно?
 
-При единственном наследовании вопросов нет: `D(B)` → ищем в D, потом в B, потом в object. Но при **множественном наследовании** Python должен решить, **в каком порядке** искать методы, чтобы:
-1. Ни один класс не был проверен дважды (избежать цикла)
-2. Порядок был предсказуемым
-3. Ребёнок имел приоритет над родителем
+**Простыми словами:** представь, что твой класс наследует два других, а те — ещё один общий. В каком порядке искать методы? Python использует алгоритм C3 Linearization, который гарантирует:
+1. Ребёнок проверяется раньше родителей
+2. Порядок родителей в `class D(B, C)` соблюдается (B раньше C)
+3. Общий предок проверяется ровно один раз (нет ромбовидной проблемы)
 
-### C3 Linearization — как это работает
+### Diamond problem — почему без MRO хаос
+
+```
+    A
+   / \
+  B   C
+   \ /
+    D
+```
+
+Без MRO: если `D.method()` вызывает `super().method()`, должен ли он пойти через B или C? «Старый» Python (до 2.3) использовал "depth-first, left-to-right" — это приводило к тому, что A проверялся дважды, или родитель C имел приоритет над B.
+
+**C3 Linearization (с Python 2.3):** `D.mro() = [D, B, C, A, object]`.
+
+### Как работает C3 Linearization
 
 ```python
 class A:
@@ -103,76 +127,140 @@ class D(B, C):
     pass
 
 print(D.mro())
-# [D, B, C, A, object]
-# Почему B перед C? Потому что D(B, C) — B указан первым.
-# Почему C перед A? Потому что A — родитель C, но C указан раньше,
-#   чем A появился бы в MRO через B.
+# [<class 'D'>, <class 'B'>, <class 'C'>, <class 'A'>, <class 'object'>]
+print(D().method())  # "B" — потому что B первый в MRO после D
 ```
 
-**Формула:** MRO — это `[D] + merge(MRO(B), MRO(C), [B, C])`.
+**Алгоритм merge:**
+```
+MRO(D) = [D] + merge(MRO(B), MRO(C), [B, C])
+       = [D] + merge([B, A, object], [C, A, object], [B, C])
+       = [D, B] + merge([A, object], [C, A, object], [C])  # B взят из первого списка
+       = [D, B, C] + merge([A, object], [A, object], [])   # C взят — он не в хвостах
+       = [D, B, C, A] + merge([object], [object], [])
+       = [D, B, C, A, object]
+```
 
-`merge` работает так:
-1. Берёт первый элемент первого списка.
-2. Если он не встречается в хвостах других списков — помещает в результат.
-3. Иначе — переходит к следующему списку.
+**Правило:** берём первый элемент первого списка. Если его нет в хвосте (все элементы кроме первого) ни одного другого списка — добавляем в результат. Иначе — пропускаем, переходим к следующему списку.
 
-### super() + MRO = кооперативное наследование
+### super() и кооперативное наследование
 
 ```python
 class A:
     def __init__(self):
+        super().__init__()  # object.__init__()
         print("A")
 
 class B(A):
     def __init__(self):
-        super().__init__()
+        super().__init__()  # ИДЁТ ПО MRO → следующий = C!
         print("B")
 
 class C(A):
     def __init__(self):
-        super().__init__()
+        super().__init__()  # A.__init__()
         print("C")
 
 class D(B, C):
     def __init__(self):
-        super().__init__()
+        super().__init__()  # B.__init__()
 
-D()  # A → C → B
+D()
+# Вывод: A → C → B
+# Почему? MRO(D) = [D, B, C, A, object]
+# D.__init__ → super() → B.__init__ → super() → C.__init__ (не A!)
+#   → super() → A.__init__ → "A" → "C" → "B"
 ```
 
-**Почему A → C → B, а не A → B → C?** Потому что MRO(D) = [D, B, C, A, object]. `super()` в B вызывает следующий по MRO класс, то есть C, а не A.
+**Ключевой вывод:** `super()` не вызывает метод родителя напрямую. Он вызывает **следующий класс в MRO**. Если вы используете множественное наследование, **все** классы должны вызывать `super().__init__()`, иначе цепочка прервётся.
 
-**Ключевой вывод:** Если вы используете множественное наследование, **все классы должны вызывать `super().__init__()`**, иначе цепочка прервётся.
-
-### `__new__` vs `__init__`
+### `__new__` vs `__init__` — порядок создания объекта
 
 ```python
-class Singleton:
-    _instance = None
-
+class MyClass:
     def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+        # Шаг 1: создание объекта (сырой памяти)
+        instance = super().__new__(cls)
+        print(f"__new__ called, type={type(instance)}")
+        return instance  # ОБЯЗАН вернуть экземпляр
 
     def __init__(self, value):
-        # Будет вызван КАЖДЫЙ раз при Singleton(value)
+        # Шаг 2: инициализация полей
         self.value = value
+        print(f"__init__ called, value={value}")
+
+obj = MyClass(42)
+# __new__ called, type=<class 'MyClass'>
+# __init__ called, value=42
 ```
 
-- `__new__` — создаёт объект (вызывается **до** `__init__`), **обязан** вернуть экземпляр
-- `__init__` — инициализирует поля, **не возвращает** ничего
+| | `__new__` | `__init__` |
+|--|----------|-----------|
+| Когда вызывается | ДО `__init__` | ПОСЛЕ `__new__` |
+| Что принимает | `cls` + args | `self` (уже созданный) + args |
+| Что возвращает | Экземпляр (обязан!) | `None` (не должен возвращать) |
+| Где переопределять | Singleton, metaclass, immutable types | Обычная инициализация |
 
-**Когда переопределять `__new__`?**
-- Singleton (выше)
-- Кастомные метаклассы
-- Иммутабельные типы (int, str, tuple) — только `__new__`, `__init__` не вызывается
+### Singleton через `__new__`
+
+```python
+class Database:
+    _instance = None
+
+    def __new__(cls, url=None):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self, url=None):
+        if self._initialized:
+            return  # не переинициализировать!
+        self.url = url
+        self._initialized = True
+
+db1 = Database("postgres://...")
+db2 = Database("another-url")  # игнорируется
+print(db1 is db2)              # True
+print(db1.url)                 # "postgres://..."
+```
+
+### Абстрактные классы и протоколы
+
+```python
+from abc import ABC, abstractmethod
+
+class PaymentProcessor(ABC):
+    @abstractmethod
+    async def charge(self, amount: float) -> bool:
+        """Списать деньги. Обязан переопределить."""
+        ...
+
+    @abstractmethod
+    async def refund(self, transaction_id: str) -> bool:
+        ...
+
+# Нельзя создать экземпляр ABC:
+# processor = PaymentProcessor()  # ❌ TypeError
+
+class StripeProcessor(PaymentProcessor):
+    async def charge(self, amount: float) -> bool:
+        # реальная имплементация
+        return True
+
+    async def refund(self, transaction_id: str) -> bool:
+        return True
+
+processor = StripeProcessor()  # ✅
+```
 
 ---
 
 ## 3. Декораторы
 
-### Как работает декоратор (уровень байткода)
+### Как работает декоратор
+
+**Простыми словами:** декоратор — это «обёртка» над функцией. Он берёт функцию, добавляет к ней поведение (логирование, кэширование, проверку прав) и возвращает новую функцию. Всё это — синтаксический сахар для обычного вызова.
 
 ```python
 @decorator
@@ -180,65 +268,107 @@ def func():
     pass
 
 # Это РАВНОСИЛЬНО:
-func = decorator(func)
+# func = decorator(func)
 ```
 
-Декоратор — это просто синтаксический сахар для "применить функцию к функции". В байткоде `@decorator` превращается в `func = decorator(func)`.
+**Технически:** В байткоде `@decorator` компилируется в `CALL_FUNCTION` + `STORE_NAME`. Декоратор — это callable, который принимает callable и возвращает callable.
 
-### Декоратор с аргументами — почему три уровня?
+### Базовый декоратор
 
 ```python
-def retry(max_attempts=3, delay=0.1):
-    # УРОВЕНЬ 1: принимает аргументы декоратора
-    def decorator(func):
-        # УРОВЕНЬ 2: принимает функцию
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            # УРОВЕНЬ 3: принимает аргументы функции
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    return func(*args, **kwargs)
-                except Exception:
-                    if attempt == max_attempts:
-                        raise
-                    time.sleep(delay)
-        return wrapper
-    return decorator
+import functools
+import time
 
-# Использование:
-@retry(max_attempts=3, delay=0.5)
-def unstable_call():
-    ...
+def log_execution_time(func):
+    @functools.wraps(func)  # ← ОБЯЗАТЕЛЕН!
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        elapsed = time.perf_counter() - start
+        print(f"{func.__name__} took {elapsed:.4f}s")
+        return result
+    return wrapper
 
-# Эквивалент:
-unstable_call = retry(max_attempts=3, delay=0.5)(unstable_call)
+@log_execution_time
+def process_data(items: list) -> int:
+    """Обрабатывает данные и возвращает количество."""
+    return sum(1 for _ in items)
+
+print(process_data.__name__)  # "process_data" — с @wraps
+print(process_data.__doc__)   # "Обрабатывает данные и возвращает количество."
 ```
 
-### @functools.wraps — почему он обязателен?
+### Почему `@functools.wraps` обязателен
 
-Без него декорированная функция теряет `__name__`, `__doc__`, `__module__`:
+Без него декорированная функция теряет метаданные:
 
 ```python
-def bare_decorator(func):
+def bad_decorator(func):
     def wrapper(*args, **kwargs):
         return func(*args, **kwargs)
     return wrapper
 
-@bare_decorator
-def greet(name):
-    """Says hello"""
-    print(f"Hello {name}")
+@bad_decorator
+def greet(name: str) -> str:
+    """Says hello."""
+    return f"Hello, {name}"
 
-print(greet.__name__)  # "wrapper" — ❌ потеряли имя!
-print(greet.__doc__)   # None — ❌ потеряли документацию!
+print(greet.__name__)      # "wrapper" — ❌
+print(greet.__doc__)       # None — ❌
+print(greet.__wrapped__)   # ❌ AttributeError
+help(greet)                # показывает wrapper, а не greet
 ```
 
-`@functools.wraps(func)` копирует `__name__`, `__doc__`, `__module__`, `__dict__` с исходной функции на wrapper.
+`@functools.wraps(func)` копирует `__name__`, `__doc__`, `__module__`, `__qualname__`, `__dict__`, `__wrapped__` с исходной функции на wrapper. Также обновляет `__signature__` (через `__wrapped__`).
 
-### Декоратор как класс
+### Декоратор с аргументами — почему три уровня?
 
 ```python
+import functools
+import time
+
+def retry(max_attempts: int = 3, delay: float = 0.1, backoff: float = 2.0):
+    """Повторяет вызов функции при ошибке с exponential backoff."""
+    # УРОВЕНЬ 1: принимает аргументы декоратора → возвращает декоратор
+    def decorator(func):
+        # УРОВЕНЬ 2: принимает функцию → возвращает wrapper
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # УРОВЕНЬ 3: принимает аргументы функции → вызывает функцию
+            current_delay = delay
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == max_attempts:
+                        raise  # исчерпаны попытки
+                    print(f"Attempt {attempt} failed: {e}. Retrying in {current_delay}s...")
+                    time.sleep(current_delay)
+                    current_delay *= backoff  # экспоненциальная задержка
+        return wrapper
+    return decorator
+
+# Использование:
+@retry(max_attempts=3, delay=0.5, backoff=2.0)
+def unstable_api_call(url: str) -> dict:
+    response = requests.get(url)
+    if response.status_code >= 500:
+        raise RuntimeError(f"Server error: {response.status_code}")
+    return response.json()
+
+# Эквивалент без сахара:
+# unstable_api_call = retry(max_attempts=3, delay=0.5, backoff=2.0)(unstable_api_call)
+```
+
+**Почему три уровня, а не два?** Потому что `@retry` с аргументами — это вызов функции: `retry(max_attempts=3)`. Этот вызов должен **вернуть** что-то, что Python затем применит к функции. Это «что-то» и есть `decorator` (уровень 2).
+
+### Декоратор как класс (с состоянием)
+
+```python
+import functools
+
 class CountCalls:
+    """Декоратор-класс: считает количество вызовов."""
     def __init__(self, func):
         functools.update_wrapper(self, func)
         self.func = func
@@ -246,25 +376,35 @@ class CountCalls:
 
     def __call__(self, *args, **kwargs):
         self.calls += 1
-        print(f"Call {self.calls} of {self.func.__name__}")
+        print(f"Call {self.calls} of {self.func.__name__!r}")
         return self.func(*args, **kwargs)
+
+@CountCalls
+def say_hi(name: str):
+    return f"Hi {name}"
+
+say_hi("Alice")  # Call 1 of 'say_hi'
+say_hi("Bob")    # Call 2 of 'say_hi'
+print(say_hi.calls)  # 2
 ```
 
 **Когда класс лучше функции?**
-- Когда нужно сохранять **состояние** между вызовами (как выше)
+- Когда нужно сохранять состояние между вызовами (счётчик, кэш, метрики)
 - Когда декоратор сложный и требует нескольких методов
 
-### Где в реальном бэкенде применяют декораторы?
+### Где в реальном бэкенде применяются декораторы
 
-| Место | Декоратор | Зачем |
-|-------|----------|-------|
-| Эндпоинты | `@app.get("/path")` | FastAPI регистрирует функцию |
-| Rate limiting | `@rate_limit(10, 60)` | Ограничение вызовов |
-| Кэширование | `@lru_cache(maxsize=256)` | Кэш результатов функции |
-| Retry | `@retry(max_attempts=3)` | Повтор при ошибках |
-| Auth | `@require_role("admin")` | Проверка прав |
-| Logging | `@log_execution_time` | Замер времени |
-| Transaction | `@transactional` | Оборачивание в транзакцию |
+| Место | Декоратор | Что делает |
+|-------|----------|-----------|
+| FastAPI-эндпоинты | `@app.get("/path")` | Регистрирует функцию в роутере |
+| Rate limiting | `@rate_limit(max=100, window=60)` | Сбрасывает 429 |
+| Кэширование | `@lru_cache(maxsize=256)` | Кэширует результат |
+| Retry | `@retry(max=3, backoff=2.0)` | Повторяет при ошибке |
+| Auth | `@require_role("admin")` | Проверяет права |
+| Валидация | `@validate(schema=UserSchema)` | Валидирует аргументы |
+| Транзакции | `@transactional` | Оборачивает в begin/commit |
+| Логирование | `@log_execution_time` | Замеряет время |
+| Депрекация | `@deprecated("use new_func")` | Предупреждает |
 
 ---
 
@@ -272,87 +412,130 @@ class CountCalls:
 
 ### Зачем они нужны в бэкенде?
 
-Любая операция с ресурсом (БД, файл, HTTP-соединение, блокировка) должна:
-1. Открыть/создать ресурс
-2. **Гарантированно** закрыть/освободить, даже при исключении
+**Простыми словами:** любая операция с ресурсом (БД, файл, сетевое соединение, блокировка) требует двух шагов: открыть и гарантированно закрыть. Контекстный менеджер автоматизирует «закрыть», даже если внутри блока произошла ошибка.
 
-Без контекстного менеджера:
+### Три способа реализации
 
-```python
-conn = create_connection()
-try:
-    conn.execute("...")
-finally:
-    conn.close()  # гарантированно
-```
-
-С контекстным менеджером:
+#### Способ 1: класс с `__enter__` / `__exit__`
 
 ```python
-with create_connection() as conn:
-    conn.execute("...")
-# close() гарантированно вызван
-```
+class DatabaseSession:
+    """Управляет сессией БД: commit при успехе, rollback при ошибке."""
+    def __init__(self, db_url: str):
+        self.db_url = db_url
+        self.session = None
 
-### Как реализовать через класс
-
-```python
-class ManagedSession:
     def __enter__(self):
-        self.session = create_session()
+        self.session = create_session(self.db_url)
         return self.session
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type:
+        if exc_type is not None:
+            # Было исключение — откатываем
             self.session.rollback()
+            print(f"Rolled back due to: {exc_type.__name__}: {exc_val}")
         else:
+            # Без ошибок — коммитим
             self.session.commit()
         self.session.close()
-        # Если вернуть True — исключение будет подавлено
-        return False  # не подавлять
+        return False  # НЕ подавляем исключение (если True — подавляет!)
+
+# Использование:
+with DatabaseSession("postgres://...") as db:
+    db.execute("INSERT INTO ...")
+    db.execute("UPDATE ...")
+# commit (если без ошибок) или rollback + проброс исключения
 ```
 
-**Что делает `__exit__`:**
-- Если `exc_type is not None` — было исключение, можно его обработать
-- Если вернуть `True` — исключение будет **подавлено**
-- Если вернуть `False` (или None) — исключение пробрасывается дальше
-
-### Как реализовать через @contextmanager
+#### Способ 2: `@contextmanager` (для простых случаев)
 
 ```python
 from contextlib import contextmanager
 
 @contextmanager
-def db_session():
-    conn = create_connection()
+def db_session(db_url: str):
+    """То же самое, но через генератор. Только ОДИН yield!"""
+    session = create_session(db_url)
     try:
-        yield conn  # __enter__ возвращает это
+        yield session       # ← это точка входа в with-блок
     except Exception:
-        conn.rollback()
-        raise
+        session.rollback()
+        raise               # пробрасываем исключение дальше
     else:
-        conn.commit()
+        session.commit()    # без ошибок
     finally:
-        conn.close()
+        session.close()
+
+# Использование идентично:
+with db_session("postgres://...") as db:
+    db.execute("...")
 ```
 
-**Важно:** `yield` может быть ровно один. Если внутри `with` произошло исключение, оно выбрасывается из `yield`. Можно поймать `try/except/yield`, чтобы обработать.
+**⚠️ Осторожно:** `@contextmanager` позволяет **ровно один** `yield`. Если нужно несколько — используйте класс.
+
+#### Способ 3: `contextlib.closing` (для объектов с `.close()`)
+
+```python
+from contextlib import closing
+import urllib.request
+
+with closing(urllib.request.urlopen("http://example.com")) as page:
+    data = page.read()
+# close() вызван гарантированно
+```
 
 ### Вложенные контекстные менеджеры
 
 ```python
-with open("file.txt") as f, open("out.txt", "w") as out:
-    for line in f:
-        out.write(line.upper())
+# Python 3.10+: можно через запятую
+with (
+    open("input.txt") as fin,
+    open("output.txt", "w") as fout
+):
+    for line in fin:
+        fout.write(line.upper())
 
-# Или
-with open("file.txt") as f:
-    with open("out.txt", "w") as out:
-        for line in f:
-            out.write(line.upper())
+# Старый способ:
+with open("input.txt") as fin:
+    with open("output.txt", "w") as fout:
+        for line in fin:
+            fout.write(line.upper())
 ```
 
-Оба файла будут гарантированно закрыты, даже при ошибке.
+Все файлы закроются даже при ошибке в любом из блоков.
+
+### Что делает `__exit__`
+
+Сигнатура: `__exit__(self, exc_type, exc_value, traceback) -> bool | None`
+
+- Если исключения не было: `exc_type = exc_value = traceback = None`
+- Если было: три аргумента содержат информацию об исключении
+- Если `__exit__` возвращает `True` → исключение **подавлено** (как будто его не было)
+- Если `False` или `None` → исключение пробрасывается дальше
+
+```python
+class SuppressKeyError:
+    def __enter__(self): return self
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return exc_type is KeyError  # подавляем только KeyError
+
+with SuppressKeyError():
+    d = {}
+    x = d["nonexistent"]  # KeyError подавлен
+    print("This still runs!")  # напечатается
+```
+
+### Где в бэкенде применяются
+
+| Ресурс | Контекстный менеджер |
+|--------|---------------------|
+| Сессия БД | `async with async_session() as db:` |
+| Файл | `with open(...) as f:` |
+| HTTP-клиент | `async with httpx.AsyncClient() as client:` |
+| Блокировка | `async with asyncio.Lock():` |
+| Семафор | `async with asyncio.Semaphore(10):` |
+| RabbitMQ | `async with connection:` |
+| Таймер | `with Timer() as t: ...; print(t.elapsed)` |
 
 ---
 
@@ -360,27 +543,25 @@ with open("file.txt") as f:
 
 ### Что решают data classes?
 
-До dataclasses:
+**Проблема:** до dataclasses для простого DTO нужно было писать `__init__`, `__repr__`, `__eq__` — тонны boilerplate.
+
+**Решение:** одна строка `@dataclass` генерирует всё это автоматически (и опционально: `__hash__`, `__lt__`, `__gt__`, `__le__`, `__ge__`, `__slots__`).
 
 ```python
-class User:
-    def __init__(self, id, name, email):
+# До dataclasses (~15 строк boilerplate)
+class UserOld:
+    def __init__(self, id: int, name: str, email: str):
         self.id = id
         self.name = name
         self.email = email
-
     def __repr__(self):
-        return f"User(id={self.id}, name={self.name!r})"
-
+        return f"UserOld(id={self.id}, name={self.name!r}, email={self.email!r})"
     def __eq__(self, other):
-        if not isinstance(other, User):
+        if not isinstance(other, UserOld):
             return NotImplemented
-        return self.id == other.id
-```
+        return (self.id, self.name, self.email) == (other.id, other.name, other.email)
 
-После dataclasses:
-
-```python
+# С dataclasses — 4 строки:
 @dataclass
 class User:
     id: int
@@ -388,94 +569,132 @@ class User:
     email: str
 ```
 
-Одна строчка `@dataclass` генерирует `__init__`, `__repr__`, `__eq__` (и опционально `__hash__`, `__lt__`, `__gt__`, `__le__`, `__ge__`).
+### Параметры `@dataclass`
 
-### Параметры @dataclass
+| Параметр | По умолчанию | Что делает | Пример использования |
+|----------|-------------|-----------|---------------------|
+| `init=True` | ✅ | Генерирует `__init__` | Выключить для frozen-only DTO |
+| `repr=True` | ✅ | Генерирует `__repr__` | Выключить для объектов с секретами |
+| `eq=True` | ✅ | Генерирует `__eq__` | Сравнение по id, а не всем полям |
+| `order=False` | ❌ | `__lt__`, `__le__`, `__gt__`, `__ge__` | Сортировка списков DTO |
+| `unsafe_hash=False` | ❌ | `__hash__` (даже с mutable полями) | Только если уверены |
+| `frozen=False` | ❌ | Поля неизменяемы после `__init__` | Immutable DTO для кэша |
+| `slots=False` (3.10+) | ❌ | `__slots__` вместо `__dict__` | Экономия памяти (~50%) |
+| `kw_only=False` (3.10+) | ❌ | Все поля keyword-only | Явность вызова |
 
-| Параметр | Что делает | Когда нужен |
-|----------|-----------|-------------|
-| `order=True` | Генерирует `__lt__`, `__le__`, `__gt__`, `__ge__` | Когда нужно сортировать |
-| `frozen=True` | Все поля readonly после `__init__` | Immutable DTO |
-| `slots=True` (3.10+) | `__slots__` вместо `__dict__` | Экономия памяти |
-| `kw_only=True` (3.10+) | Все поля — keyword-only | Явные аргументы |
-
-### field() — тонкая настройка
+### `field()` — тонкая настройка полей
 
 ```python
-@dataclass
-class User:
-    id: int
-    name: str = field(compare=False)  # не участвует в сравнении
-    email: str
-    created_at: datetime = field(default_factory=datetime.now)
-    tags: list[str] = field(default_factory=list, repr=False)  # не показывать в repr
-    metadata: dict = field(default_factory=dict, hash=False)  # не участвует в hash
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+@dataclass(order=True, frozen=True)
+class Event:
+    # Порядок сравнения: timestamp → type → (data не сравнивается)
+    timestamp: datetime
+    type: str = field(compare=True)
+    data: dict[str, Any] = field(compare=False, repr=False)  # не в repr, не в сравнении
+    id: str = field(default_factory=lambda: str(uuid.uuid4()), compare=False)
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        compare=False
+    )
 
     def __post_init__(self):
-        """Валидация после __init__"""
-        if not self.email.count("@"):
-            raise ValueError("Invalid email")
+        """Валидация после генерации __init__."""
+        if not self.type.strip():
+            raise ValueError("Event type must not be empty")
+        # Для frozen нужно использовать object.__setattr__
+        if not self.data:
+            object.__setattr__(self, "data", {})  # default factory не сработал
+
+e = Event(timestamp=datetime.now(timezone.utc), type="user.created", data={"user_id": 42})
 ```
 
-**`default_factory` vs `default`:** `default_factory` принимает **вызываемый объект** (функцию), который вызывается каждый раз при создании нового экземпляра. `default` — одно и то же значение, **общее** для всех экземпляров (mutable default trap!).
+### Сравнение: dataclass vs Pydantic vs TypedDict
 
-### Когда dataclass, а когда pydantic?
+| Критерий | dataclass | Pydantic | TypedDict |
+|----------|-----------|----------|-----------|
+| Валидация | `__post_init__` (ручная) | Автоматическая, декораторы | ❌ Нет |
+| Сериализация | `dataclasses.asdict()` | `.model_dump()` / `.model_dump_json()` | ❌ Нет |
+| Десериализация | ❌ Нет | `.model_validate()` | ❌ Нет |
+| JSON Schema | ❌ Нет | `.model_json_schema()` | ❌ Нет |
+| Производительность | Быстрая (нативный Python) | Медленнее (валидация в runtime) | Очень быстрая |
+| FastAPI | Можно, но pydantic — родной | ✅ Обязателен для request/response | Можно (Body) |
+| Когда использовать | Внутренние DTO, слой репозитория | API-слой (request/response) | Простые dict-подобные структуры |
 
-| Критерий | Data class | Pydantic |
-|----------|-----------|----------|
-| Валидация | `__post_init__` ручками | Авто, декораторы валидаторов |
-| Сериализация | `dataclasses.asdict()` | `.model_dump()`, `.model_dump_json()` |
-| Десериализация | Нет (ручками) | `.model_validate()` |
-| Производительность | Быстрее | Медленнее (валидация) |
-| FastAPI | Можно, но pydantic родной | Обязателен для request/response |
-
-**Практика:** data class для внутренних DTO (слой репозитория), pydantic — для API-слоя.
+**Практика:** dataclass для внутренних DTO, Pydantic для API, TypedDict для аннотации словарей с известной структурой.
 
 ---
 
 ## 6. Аннотации типов (typing)
 
-### Зачем они на собесе?
-
-Потому что Python стал **строже** с типами в 3.10–3.12. Код без типов на senior-позиции — красный флаг.
-
-### Protocol — утиная типизация с проверкой
+### Protocol — структурная типизация (утиная типизация со статической проверкой)
 
 ```python
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
+@runtime_checkable  # позволяет isinstance() в runtime (Python 3.8+)
 class Streamable(Protocol):
-    async def read(self) -> bytes: ...
+    async def read(self) -> bytes:
+        """Читает данные."""
+        ...
+    async def close(self) -> None:
+        """Закрывает поток."""
+        ...
 
-async def process_stream(stream: Streamable):
+async def process(stream: Streamable) -> str:
     data = await stream.read()
-    ...
+    await stream.close()
+    return data.decode()
 
-# Любой объект с async def read(self) -> bytes подойдёт
+# Любой класс с read() + close() подходит — БЕЗ наследования!
 class FileStream:
     async def read(self) -> bytes:
-        return await self.file.read()
+        return await self._file.read()
+    async def close(self) -> None:
+        await self._file.close()
 
-await process_stream(FileStream())  # ✅
+class NetworkStream:
+    async def read(self) -> bytes:
+        return await self._socket.recv(4096)
+    async def close(self) -> None:
+        self._socket.shutdown()
+
+await process(FileStream())    # ✅ mypy доволен
+await process(NetworkStream()) # ✅ mypy доволен
+
+# С @runtime_checkable:
+print(isinstance(FileStream(), Streamable))  # True
 ```
 
-**`Protocol` отличается от `ABC` (AbstractBaseClass):**
+**Protocol vs ABC:**
 - `ABC` требует явного наследования: `class FileStream(StreamableABC)`
-- `Protocol` требует **только** совпадения сигнатуры — "утиная типизация для mypy"
+- `Protocol` требует только совпадения сигнатуры — structural subtyping
+- `Protocol` проверяется **статически** (mypy/pyright)
+- `ABC` проверяется и **в runtime** (isinstance/issubclass)
 
-### TypeAlias — читаемость
+### TypeAlias и сложные типы
 
 ```python
 from typing import TypeAlias
+from uuid import UUID
 
-# Без алиаса:
-def process(data: dict[str, "dict[str, int | str | float | bool | None] | list["dict[str, ...]"]):
+# Без TypeAlias — невозможно читать:
+def process(
+    data: dict[str, list[dict[str, int | str | float | bool | None]]]
+) -> int:
     ...
 
-# С алиасом:
+# С TypeAlias — читаемо:
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
+UserId: TypeAlias = int
+OrderId: TypeAlias = UUID
 
-def process(data: JSON):
+type EventPayload = dict[str, JSON]  # Python 3.12+ — альтернативный синтаксис!
+
+def process(data: JSON) -> int:
     ...
 ```
 
@@ -484,26 +703,64 @@ def process(data: JSON):
 ```python
 from typing import TypeVar, Generic
 
-T = TypeVar("T", bound="BaseModel")
+T = TypeVar("T")
+TModel = TypeVar("TModel", bound="BaseModel")  # только наследники BaseModel
 
-class Repository(Generic[T]):
-    async def get_by_id(self, id: int) -> T | None:
+class Repository(Generic[TModel]):
+    """Обобщённый репозиторий для любого типа модели."""
+
+    async def get_by_id(self, id: int) -> TModel | None:
         ...
 
-class UserRepo(Repository[User]):
+    async def list(self, offset: int = 0, limit: int = 20) -> list[TModel]:
+        ...
+
+    async def save(self, entity: TModel) -> TModel:
+        ...
+
+    async def delete(self, id: int) -> bool:
+        ...
+
+# Использование:
+class UserRepository(Repository[User]):
     async def get_by_email(self, email: str) -> User | None:
         ...
+
+class OrderRepository(Repository[Order]):
+    async def get_by_user(self, user_id: int) -> list[Order]:
+        ...
 ```
 
-### Literal — константы
+### Literal, Final, TypedDict
 
 ```python
-from typing import Literal
+from typing import Literal, Final, TypedDict
 
-def set_mode(mode: Literal["sync", "async", "batch"]):
+# Literal — ограниченный набор значений
+def set_log_level(level: Literal["debug", "info", "warning", "error"]) -> None:
     ...
-# set_mode("async") — ✅
-# set_mode("parallel") — ❌ mypy warning
+
+set_log_level("info")     # ✅
+# set_log_level("verbose")  # ❌ mypy: error
+
+# Final — константа (не переопределять)
+MAX_RETRIES: Final = 3
+# MAX_RETRIES = 5  # ❌ mypy: error
+
+# TypedDict — dict с известной структурой
+class UserDict(TypedDict, total=False):  # total=False = не все поля обязательны
+    id: int
+    name: str
+    email: str
+    age: int
+
+def print_user(user: UserDict) -> None:
+    print(f"{user.get('name', 'Unknown')} <{user.get('email', 'no email')}>")
+
+print_user({"id": 1, "name": "Alice", "email": "alice@ex.com"})  # ✅
+print_user({"id": 2, "name": "Bob"})                              # ✅ (total=False)
 ```
 
-**На собесе:** "Какие модули из стандартной библиотеки используете?" — это вопрос не про память, а про **осознанность выбора**. Если вы используете `defaultdict`, вы должны сказать, почему он лучше обычного dict (не нужно проверять ключ). Если `lru_cache` — упомяните, что он thread-safe, но не для async-функций.
+---
+
+> **На собесе:** «Расскажите про типы в Python» — начните с mutability и почему это важно. Затем ООП и MRO (diamond problem). Затем декораторы (3 уровня). Затем Protocol vs ABC. Покажите, что вы понимаете не синтаксис, а семантику и trade-off.

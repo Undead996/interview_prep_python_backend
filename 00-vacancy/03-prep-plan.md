@@ -1,297 +1,393 @@
-# План подготовки — детально
+# План подготовки — пошаговый маршрут
 
-Этот файл — твой маршрут. Не "что почитать", а **какие именно навыки прокачать за каждую тренировку**.
+> **Цель:** не «что почитать», а **какие именно навыки прокачать** за каждую тренировку, с проверочными заданиями.
 
 ---
 
-## 14 дней (полный план)
+## Как пользоваться этим планом
 
-### День 1. Разбор вакансии и самооценка (1 ч)
+Каждый день содержит:
+- **Цель** — что должно быть в голове к концу дня
+- **Что сделать** — конкретные файлы, разделы, задачи
+- **Как проверить** — конкретное действие: ответить вслух, написать код, решить задачу
 
-**Цель:** понять, что спрашивают на собесе, и честно оценить свой уровень.
+После каждой тренировки возвращайся к `02-self-assessment.md` и обновляй оценки.
+
+---
+
+# План А: 14 дней (полный, оптимальный)
+
+---
+
+## День 1. Разбор вакансии и самооценка (1 час)
+
+**Цель:** понять, что спрашивают, и честно оценить свой уровень.
 
 ```
 Что сделать:
-1. Прочитать `00-vacancy/01-vacancy-breakdown.md` — расшифровка требований.
-2. Заполнить `00-vacancy/02-self-assessment.md` — проставить оценки 1–5.
-3. Выписать 3 темы с минимальными оценками — это твои «слабые места».
+1. Прочитать `00-vacancy/01-vacancy-breakdown.md` — расшифровка требований
+2. Заполнить `00-vacancy/02-self-assessment.md` — все оценки 1-5
+3. Выписать 3-5 тем с оценкой ≤ 2 — это твой фокус
 ```
 
-**Результат:** знаешь, на чём фокусироваться. Слабые места — в приоритет.
+**Результат:** ты знаешь свой真实ный уровень и 3-5 слабых мест. План дальше строится с приоритетом на них.
+
+**Проверка:** сможешь ли ты назвать 3 главных отличия PG от MySQL прямо сейчас?
 
 ---
 
-### День 2–3. Python core + async (4 ч)
+## День 2. Python: типы, ООП, декораторы (2 часа)
 
-**Цель:** уверенно отвечать на вопросы про GIL, async/await, декораторы, MRO.
+**Цель:** уверенно объяснить модель памяти, MRO, написать декоратор с аргументами.
 
-#### Сессия 1 (2 ч) — язык
 ```
-1. `01-language-deep.md` — прочитать разделы:
-   - Типы и изменяемость (immutable vs mutable)
-   - ООП и MRO (C3 linearization, super())
-   - Декораторы (с аргументами, как класс)
-   - Контекстные менеджеры (класс vs @contextmanager)
-   - Data classes (frozen, field, __post_init__)
-   - Аннотации типов (Protocol, TypeAlias, Literal)
+Что сделать:
+1. `01-python-core/01-language-deep.md` — прочитать:
+   §1 Типы и изменяемость (таблица, tuple с list, почему dict-key)
+   §2 ООП и MRO (C3 linearization, super(), diamond problem)
+   §3 Декораторы (3 уровня, @wraps, класс-декоратор)
+   §4 Контекстные менеджеры (класс vs @contextmanager)
+   §5 Data classes (field, frozen, slots)
+   §6 Аннотации типов (Protocol vs ABC, TypeAlias, Generic)
 
-2. `03-standard-library-deep.md` — прочитать:
-   - collections (Counter, defaultdict, deque, ChainMap)
-   - itertools (product, cycle, groupby, batched, chain)
-   - functools (lru_cache, partial, singledispatch)
-   - pathlib (Path, glob, read_text/write_text)
-
-3. `04-pitfalls-and-tasks.md` — прочитать:
-   - mutable defaults
-   - late binding
-   - is vs ==
-   - задачи 1–4 (TTL cache, rate limiter, async bulk insert)
+2. Написать код:
+   - Декоратор @retry(max_attempts=3, delay=0.5)
+   - Контекстный менеджер ManagedSession (enter → commit/rollback → close)
+   - Dataclass с __post_init__ валидацией
 ```
 
-**Как проверять:** устно ответить на вопросы из `mock-interview/02-python-deep.md` (вопросы 1–10).
-
-#### Сессия 2 (2 ч) — async
-```
-1. `02-async-and-concurrency.md` — прочитать разделы:
-   - GIL (почему, как обойти)
-   - asyncio vs threading vs multiprocessing (таблица)
-   - Event loop (как работает, типы, run_in_executor)
-   - Корутины, Tasks, Futures (жизненный цикл)
-   - gather / TaskGroup / wait / as_completed
-   - Async queues (producer-consumer)
-   - Примитивы (Lock, Semaphore, Event, Condition)
-   - Timeout и cancellation (wait_for, timeout, cancel)
-   - Async-итераторы и генераторы
-```
-
-**Как проверять:** написать код producer-consumer с `asyncio.Queue` и `Semaphore`.
+**Проверка:** устно ответь на Q1-Q7 из `mock-interview/02-python-deep.md`. Если плаваешь в MRO — перечитай и нарисуй дерево наследования.
 
 ---
 
-### День 4–5. FastAPI + SQLAlchemy (4 ч)
+## День 3. Python: async, GIL, asyncio (2 часа)
 
-**Цель:** написать CRUD с async SQLAlchemy 2.0, DI, JWT, тестами.
+**Цель:** объяснить event loop, отличие Task от Future, написать producer-consumer.
 
-#### Сессия 1 (2 ч) — FastAPI core
 ```
+Что сделать:
+1. `01-python-core/02-async-and-concurrency.md` — прочитать:
+   §1 GIL (почему, что блокирует, как обойти)
+   §2 asyncio vs threading vs multiprocessing (таблица)
+   §3 Event loop (epoll/kqueue/IOCP, как работает await)
+   §4 Coroutine/Task/Future (разница, когда что)
+   §5 Producer-Consumer с asyncio.Queue + Semaphore
+   §6 Подводные камни (time.sleep в async def, gather без return_exceptions)
+
+2. `01-python-core/03-standard-library-deep.md` — прочитать:
+   §1 collections (defaultdict, Counter, deque, ChainMap)
+   §2 itertools (product, cycle, groupby, chain, batched)
+   §6 functools (lru_cache, partial, singledispatch)
+
+3. Написать код:
+   - Producer-consumer с asyncio.Queue(maxsize=100) и 3 workers
+   - Rate limiter с asyncio.Semaphore
+```
+
+**Проверка:** напиши код, который конкурентно качает 10 URL через asyncio.Semaphore(3) и httpx.AsyncClient.
+
+---
+
+## День 4. FastAPI: routing, DI, middleware, lifespan (2 часа)
+
+**Цель:** написать эндпоинт с Depends, middleware, exception handler, lifespan.
+
+```
+Что сделать:
 1. `02-fastapi/01-routing-and-dependency-injection.md`:
-   - Path/Query параметры
-   - Depends() — функция, класс, генератор
-   - Middleware (как написать, CORS, TrustedHost)
-   - Exception handlers (кастомные ошибки)
-   - BackgroundTasks
-   - Lifespan
+   §1 Как FastAPI обрабатывает запрос (ASGI-конвейер)
+   §2 Dependency Injection — Depends() 3 способа
+   §3 Middleware — порядок, CORS, кастомный logging
+   §4 Exception handlers — кастомные AppError
+   §5 Lifespan — startup/shutdown для engine/Redis/Kafka
+
+2. Написать код:
+   - CRUD-эндпоинт с Depends(get_db)
+   - Middleware для X-Process-Time
+   - Custom exception handler для AppError
+   - Lifespan с engine + Redis
+```
+
+**Проверка:** ответь на Q1-Q5 из `mock-interview/03-fastapi.md`.
+
+---
+
+## День 5. FastAPI: SQLAlchemy 2.0, транзакции, N+1 (2 часа)
+
+**Цель:** написать async-запрос с joinedload, транзакцию с savepoint.
+
+```
+Что сделать:
+1. `02-fastapi/02-sqlalchemy-and-database.md`:
+   §1 Async engine + session (pool_size, max_overflow, pool_pre_ping)
+   §2 Repository pattern
+   §3 N+1 problem (4 решения: joinedload, selectinload, subqueryload, raiseload)
+   §4 Транзакции (begin/commit/savepoint/rollback)
+   §5 Connection pool, Alembic (init, autogenerate, upgrade/downgrade)
 
 2. `02-fastapi/03-auth-and-security.md`:
-   - JWT encode/decode (exp, sub)
-   - OAuth2PasswordBearer + OAuth2PasswordRequestForm
-   - bcrypt hashing (passlib)
-   - RBAC (require_role)
-   - Rate limiting (in-memory + Redis)
+   §1 JWT (header.payload.signature, exp/sub/iat)
+   §2 OAuth2 Password Flow
+   §3 Rate limiting (in-memory + Redis)
+
+3. Написать код:
+   - Repository с get_by_id / list / create
+   - Запрос с selectinload для Order.items
+   - Транзакцию с savepoint (begin_nested)
 ```
 
-#### Сессия 2 (2 ч) — SQLAlchemy + тесты
-```
-1. `02-fastapi/02-sqlalchemy-and-database.md`:
-   - Async engine + async_sessionmaker
-   - Repository pattern
-   - N+1 (joinedload vs selectinload)
-   - Транзакции (begin/commit/savepoint)
-   - Connection pool
-   - Alembic (init, autogenerate, upgrade/downgrade)
-
-2. `02-fastapi/04-testing-and-deployment.md`:
-   - TestClient with lifespan
-   - Dependency overrides (in-memory SQLite)
-   - Dockerfile (multi-stage)
-   - CI/CD (GitHub Actions)
-```
-
-**Как проверять:** решить `tasks/02-fastapi-tasks.md` (3 задачи: CRUD, JWT, контрактный тест).
+**Проверка:** напиши запрос к БД, который загружает User + его Orders + Items каждого Order. Сколько запросов? Как уменьшить?
 
 ---
 
-### День 6–7. PostgreSQL + MySQL (4 ч)
+## День 6. FastAPI: pytest, TestClient, Docker (2 часа)
 
-**Цель:** читать EXPLAIN ANALYZE, объяснить MVCC, написать оконные функции.
+**Цель:** написать интеграционный тест с TestClient + dependency override.
 
 ```
+Что сделать:
+1. `02-fastapi/04-testing-and-deployment.md`:
+   §1 TestClient (with lifespan, async tests)
+   §2 Dependency override (in-memory SQLite)
+   §3 Contract tests (OpenAPI schema)
+   §4 Docker multi-stage + docker-compose
+   §5 CI/CD (GitHub Actions)
+
+2. Написать код:
+   - Фикстуру test_db (in-memory SQLite + create_all)
+   - Тест на создание + получение пользователя
+   - Тест на 404 (несуществующий пользователь)
+   - Contract test: все эндпоинты имеют summary
+```
+
+**Проверка:** запусти `pytest --cov` и убедись, что coverage > 80% для твоего тестового приложения.
+
+---
+
+## День 7–8. PostgreSQL: MVCC, индексы, EXPLAIN (2 × 2 часа)
+
+**Цель:** читать EXPLAIN ANALYZE, объяснить MVCC до dead tuples, написать 3 индекса под задачу.
+
+```
+Что сделать:
 1. `03-postgresql-mysql/01-postgresql-deep.md`:
-   - MVCC (xmin/xmax, dead tuples, VACUUM vs VACUUM FULL)
-   - Индексы: B-tree / GIN / BRIN / partial / covering
-   - EXPLAIN ANALYZE (Seq Scan vs Index Scan vs Index Only Scan)
-   - Транзакции и уровни изоляции
-   - Партиционирование
-   - CTE и оконные функции
-   - pg_stat_* — диагностика
+   §1 MVCC (xmin/xmax, dead tuples, VACUUM vs VACUUM FULL)
+   §2 Индексы (B-tree / GIN / BRIN / HASH / partial / covering) — с синтаксисом
+   §3 EXPLAIN ANALYZE — примеры вывода, как читать cost/rows/time
+   §4 CTE + оконные функции
+   §5 Уровни изоляции
+   §6 Партиционирование
 
 2. `03-postgresql-mysql/02-mysql-deep-and-diff.md`:
-   - Сравнительная таблица PG vs MySQL
-   - Когда мигрируют с MySQL на PG
-   - Различия в синтаксисе и транзакциях
-   - Движки MySQL
+   §1 Сравнительная таблица (20+ пунктов)
+   §2 Движки MySQL (InnoDB vs MyISAM)
+   §3 Когда мигрировать с MySQL на PG
 
 3. `03-postgresql-mysql/03-sql-tasks-with-solutions.md`:
-   - Решить все 8 задач
+   Решить задачи 1-8 (минимум 5)
 ```
 
-**Как проверять:** устно ответить на вопросы из `mock-interview/04-postgresql-mysql.md`.
+**Проверка:** напиши CREATE INDEX для полнотекстового поиска по полю body (JSONB). Какой индекс? Почему GIN?
 
 ---
 
-### День 8–9. RabbitMQ (3 ч)
+## День 9. RabbitMQ: AMQP, DLX, outbox (2 часа)
 
-**Цель:** объяснить AMQP-модель, DLX, outbox pattern, написать consumer с retry.
+**Цель:** объяснить AMQP-модель, написать consumer с retry + DLX.
 
 ```
+Что сделать:
 1. `04-rabbitmq/01-amqp-concepts.md`:
-   - AMQP-модель (Producer → Exchange → Queue → Consumer)
-   - Типы exchange (direct, fanout, topic, headers)
-   - Свойства очередей (durable, auto_delete, exclusive)
-   - DLX (когда срабатывает, как настроить)
-   - VHosts и Channels
+   §1 AMQP-модель (Producer → Exchange → Queue → Consumer)
+   §2 Типы exchange (direct/fanout/topic/headers)
+   §3 DLX (когда срабатывает, настройка)
 
 2. `04-rabbitmq/02-reliability-and-patterns.md`:
-   - Publisher confirms
-   - Consumer ack/nack/reject
-   - Outbox pattern (почему нужен, как работает)
-   - TTL
-   - Quorum queues
+   §1 Publisher confirms
+   §2 Consumer ack/nack/reject
+   §3 Outbox pattern (полная реализация)
 
 3. `04-rabbitmq/03-python-integration-tasks.md`:
-   - aio-pika (producer/consumer)
-   - FastAPI + RabbitMQ (lifespan)
-   - Задачи 1–2 (retry + DLX, outbox)
+   aio-pika producer/consumer код
 ```
 
-**Как проверять:** решить `tasks/03-queue-tasks.md` (задача 1 — outbox).
+**Проверка:** нарисуй схему: FastAPI → outbox-таблица → poller → RabbitMQ → consumer → DB. Где что может упасть и как восстанавливаемся?
 
 ---
 
-### День 10–11. Apache Kafka (3 ч)
+## День 10. Kafka: partitions, offsets, exactly-once (2 часа)
 
-**Цель:** объяснить partition, offset, rebalancing, гарантии доставки.
+**Цель:** объяснить partition, offset management, гарантии доставки.
 
 ```
+Что сделать:
 1. `05-kafka/01-kafka-concepts.md`:
-   - Topic → Partition → Consumer Group → Offset
-   - Producer (key-hash, round-robin)
-   - Kafka vs RabbitMQ (таблица)
-   - Когда выбирать что
+   §1 Topic → Partition → Consumer Group → Offset
+   §2 Producer (key-hash, round-robin)
+   §3 Kafka vs RabbitMQ (таблица сравнения)
 
 2. `05-kafka/02-reliability-and-consumption.md`:
-   - Гарантии: at-most-once, at-least-once, exactly-once
-   - Offset management (auto vs manual commit)
-   - Rebalancing (что происходит, как уменьшить)
-   - Idempotent producer
+   §1 At-least-once / exactly-once (acks + idempotent)
+   §2 Offset management (manual commit)
+   §3 Rebalancing
 
 3. `05-kafka/03-python-integration-tasks.md`:
-   - aiokafka (producer/consumer)
-   - confluent-kafka
-   - FastAPI + Kafka
-   - Задачи 1–2
+   aiokafka producer/consumer код
 ```
 
-**Как проверять:** устно ответить на вопросы из `mock-interview/05-rabbitmq-kafka.md`.
+**Проверка:** ответь на Q1-Q6 из `mock-interview/05-rabbitmq-kafka.md`.
 
 ---
 
-### День 12. Redis (2 ч)
+## День 11. Redis: структуры, кэш, persistence (2 часа)
 
-**Цель:** написать rate limiter, distributed lock, cache aside.
+**Цель:** написать rate limiter и distributed lock с Redis.
 
 ```
+Что сделать:
 1. `06-redis/01-data-structures-and-caching.md`:
-   - Strings, Lists, Sets, Hashes, Sorted Sets, Streams
-   - Стратегии кэширования (Cache Aside, Write Through, Write Behind)
+   §1 8 структур (таблица «когда что»)
+   §2 Кэш-стратегии (Cache Aside, Write Through, Write Behind)
+   §3 TTL, инвалидация
 
 2. `06-redis/02-persistence-and-advanced.md`:
-   - RDB vs AOF (trade-off)
-   - Sentinel vs Cluster
-   - Rate limiting (sliding window)
-   - Distributed lock (setnx + Lua)
-   - Pub/Sub vs Streams
+   §1 RDB vs AOF (trade-off)
+   §2 Sentinel vs Cluster
+   §3 Rate limiting (sliding window)
+   §4 Distributed lock (SETNX + Lua)
 
 3. `06-redis/03-python-integration-tasks.md`:
-   - redis-py vs redis.asyncio
-   - FastAPI + Redis
-   - Задачи 1–2
+   redis.asyncio, pipeline, transaction, lifespan
 ```
 
-**Как проверять:** написать rate limiter middleware с Redis.
+**Проверка:** напиши rate limiter middleware для FastAPI с Redis: 100 запросов в минуту по IP. Какой ключ? Какой TTL?
 
 ---
 
-### День 13. Мок-интервью вслух (3 ч)
+## День 12. Задачи: Python + FastAPI + очереди (2 часа)
 
-**Цель:** проговорить ответы, чтобы на собесе не "зажевывать".
+**Цель:** прорешать задачи, чтобы закрыть пробелы.
 
 ```
-1. `mock-interview/01-hr-screening.md` — рассказ о себе (1–2 мин)
-2. `mock-interview/02-python-deep.md` — 30 вопросов вслух
-3. `mock-interview/03-fastapi.md` — 10 вопросов вслух
-4. `mock-interview/04-postgresql-mysql.md` — 6 вопросов вслух
-5. `mock-interview/05-rabbitmq-kafka.md` — 6 вопросов вслух
-6. `mock-interview/06-redis.md` — 6 вопросов вслух
-7. `mock-interview/07-live-coding.md` — решить 3 задачи на бумаге/доске
-8. `mock-interview/08-behavioral-star.md` — рассказать 3 STAR-истории
+Что сделать:
+1. `tasks/01-python-tasks.md` — решить задачи 1-5
+2. `tasks/02-fastapi-tasks.md` — решить задачи 1-5
+3. `tasks/03-queue-tasks.md` — решить задачи 1-5
+
+Решай на бумаге или в редакторе. Потом сверяй с решением.
 ```
 
-**Важно:** не читай с экрана. Закрой файл и расскажи своими словами. Если плаваешь — перечитай материал.
+**Проверка:** если какая-то задача заняла > 10 минут — перечитай соответствующий раздел.
 
 ---
 
-### День 14. Cheatsheets + STAR (2 ч)
+## День 13. Мок-интервью вслух (3 часа)
 
-**Цель:** освежить всё перед собеседованием.
+**Цель:** проговорить ответы на все вопросы так, как будто ты на собесе.
 
 ```
-1. `cheatsheets/*` — пролистать все 6 файлов (5 мин каждый)
-2. `mock-interview/07-live-coding.md` — ещё раз решить задачи (30 мин)
-3. `mock-interview/08-behavioral-star.md` — рассказать истории (30 мин)
+Порядок (каждый блок — 20-30 минут):
+1. mock-interview/01-hr-screening.md — рассказ о себе (2 мин)
+2. mock-interview/02-python-deep.md — 30 вопросов вслух
+3. mock-interview/03-fastapi.md — 20 вопросов вслух
+4. mock-interview/04-postgresql-mysql.md — 20 вопросов вслух
+5. mock-interview/05-rabbitmq-kafka.md — 20 вопросов вслух
+6. mock-interview/06-redis.md — 15 вопросов вслух
+7. mock-interview/07-live-coding.md — решить 5 задач на бумаге
+8. mock-interview/08-behavioral-star.md — рассказать 5 STAR-историй
 ```
 
-**Не учи новое!** Только повторение.
+**Критически важно:** не читай с экрана! Закрой файл, расскажи своими словами. Если где-то плаваешь — открой материал, перечитай и расскажи ещё раз.
 
 ---
 
-## 7 дней (интенсив)
+## День 14. Cheatsheets + финальный прогон (2 часа)
 
-Если времени мало — сжимаем до самого важного:
-
-| День | Что делаем | Почему |
-|------|-----------|--------|
-| 1 | Python core + async | База, без неё никуда |
-| 2 | FastAPI + SQLAlchemy | Основной инструмент |
-| 3 | PostgreSQL + MySQL | SQL на собесе — 40% времени |
-| 4 | RabbitMQ + Kafka базово | Очереди — 20% времени |
-| 5 | Mock-interview: Python + FastAPI вслух | Проговорить ответы |
-| 6 | Решить задачи: Python + FastAPI | Практика |
-| 7 | Cheatsheets + Live coding + STAR | Финальный прогон |
-
----
-
-## 3 дня (SOS)
-
-Режим "пожар":
-
-| День | Что успеваем | Формат |
-|------|-------------|--------|
-| 1 | Python core (типы, MRO, декораторы, async) + FastAPI core (DI, middleware, lifespan) | Читать + сразу отвечать вслух |
-| 2 | PostgreSQL (MVCC, индексы, EXPLAIN) + RabbitMQ (AMQP, DLX, ack) | Только теория, без кода |
-| 3 | Mock-interview: Python + FastAPI + БД вслух + cheatsheets | Проговорить, не учить новое |
-
----
-
-## День перед собесом — чеклист
+**Цель:** освежить всё, не учить новое.
 
 ```
-□ 08:00 — Пройти cheatsheets (30 мин)
-□ 09:00 — Live-coding (2 задачи "на доске", 30 мин)
-□ 10:00 — STAR-истории вслух (30 мин)
-□ 20:00 — Спать
-□ Батарейка ноутбука заряжена
+План:
+1. cheatsheets/* — пролистать все 6 файлов (5 мин каждый = 30 мин)
+2. mock-interview/07-live-coding.md — решить 2 задачи (30 мин)
+3. mock-interview/08-behavioral-star.md — рассказать 3 истории (30 мин)
+4. 00-vacancy/02-self-assessment.md — обновить оценки (30 мин)
+```
+
+**Не учи новое!** Если наткнулся на незнакомое — запиши в «на будущее», не пытайся выучить за день.
+
+---
+
+# План Б: 7 дней (интенсив)
+
+Если времени мало — сжимаем до самого важного. Каждый день = 4 часа (2 утром + 2 вечером).
+
+| День | Утро (2 ч) | Вечер (2 ч) | Ключевая проверка |
+|------|-----------|-------------|-------------------|
+| **1** | Python: типы, MRO, декораторы, контекстные менеджеры, data classes | Python: GIL, asyncio, Task/Future, Queue, примитивы | Написать producer-consumer с asyncio.Queue |
+| **2** | FastAPI: Depends, middleware, lifespan, exception handlers | FastAPI: SQLAlchemy 2.0 async, N+1, транзакции, JWT | Написать CRUD с Depends + joinedload |
+| **3** | PostgreSQL: MVCC, индексы, EXPLAIN | MySQL diff + SQL-задачи (минимум 5) | Прочитать EXPLAIN ANALYZE запроса |
+| **4** | RabbitMQ: AMQP, DLX, outbox | Kafka: partitions, offset, exactly-once | Нарисовать outbox-архитектуру |
+| **5** | Redis: структуры, кэш-стратегии, rate limiting | Mock-interview: Python 30 вопросов вслух | Написать rate limiter с Redis |
+| **6** | Mock-interview: FastAPI 20 + БД 20 вслух | Задачи: Python (5) + FastAPI (5) | Решить каждую задачу ≤ 10 мин |
+| **7** | Mock-interview: очереди 20 + Redis 15 вслух | Cheatsheets + live-coding 5 задач + STAR | Проговорить все cheatsheets вслух |
+
+---
+
+# План В: 3 дня (SOS — «пожарный» режим)
+
+Только самое критичное. Учим отвечать на вопросы, а не писать идеальный код.
+
+| День | Что делаем (6 часов) | Формат |
+|------|---------------------|--------|
+| **1** | Python core (типы, MRO, декораторы, async) + FastAPI core (DI, middleware, lifespan, N+1) + JWT | Читать → сразу отвечать вслух. Писать минимальный код. |
+| **2** | PostgreSQL (MVCC, индексы, EXPLAIN) + RabbitMQ/Kafka (только различия и когда что) + Redis (структуры, кэш, rate limiting) | Только теория и ready-made ответы. Без deep-dive. |
+| **3** | Mock-interview ВСЛУХ (Python 30 + FastAPI 20 + БД 20) + Cheatsheets + Live-coding 2 задачи | Проговаривать, проговаривать, проговаривать. |
+
+---
+
+# План Г: 1 день (день перед собесом)
+
+**Не учить новое! Только повторение и разогрев.**
+
+```
+08:00-08:30  Cheatsheets: python → fastapi → postgres → rabbitmq → kafka → redis
+08:30-09:00  Live-coding: 2 задачи (SQL + Python) на бумаге
+09:00-09:30  STAR-истории: 3 истории вслух (баг, инициатива, конфликт)
+09:30-10:00  Рассказ о себе (2-3 варианта) + ответы на HR-вопросы
+
+Весь день:
+- Лёгкое повторение (cheatsheets)
+- Проговаривание сложных тем вслух
+- Проверка оборудования (камера, микрофон, интернет)
+
+20:00  Спать. Серьёзно. Сон > ещё один файл.
+```
+
+---
+
+## Чеклист на день собеса
+
+```
+Техническое:
+□ Ноутбук заряжен (100% или на зарядке)
+□ Интернет стабильный (проверь speedtest)
+□ Камера и микрофон работают
 □ Ссылка на созвон открыта
-□ Документы (паспорт/СНИЛС) под рукой
-□ Стакан воды на столе
+□ Редактор кода открыт (для live-coding)
+□ Ручка + 2 листа бумаги
+
+Документы:
+□ Паспорт
+□ СНИЛС / ИНН (если нужно)
+□ Трудовая книжка / выписка (если просили)
+
+Личное:
+□ Стакан воды
+□ Тихое помещение (без фона)
+□ Телефон в беззвучном режиме
+□ За 30 мин до — не учить, просто дышать
 ```
+
+---
+
+> **Главное правило:** на собесе важнее показать ход мыслей, чем идеальный код. Если не помнишь синтаксис — скажи «точно не помню, но идея такая», и объясни подход. Интервьюер оценит мышление выше, чем запоминание.
