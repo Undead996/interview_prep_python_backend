@@ -1,37 +1,52 @@
-# FastAPI: Testing and Deployment
+# FastAPI: Testing and Deployment — глубоко
+
+> **Цель:** научиться тестировать FastAPI так, чтобы тесты были быстрыми,
+> изолированными и надёжными.
 
 ---
 
-## TestClient
+## 1. TestClient — как тестировать ASGI-приложение
 
 ```python
-import pytest
 from fastapi.testclient import TestClient
-from main import app
 
+def test_healthcheck():
+    with TestClient(app) as client:
+        resp = client.get("/api/health")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+```
 
-@pytest.fixture(scope="session")
-def client():
-    with TestClient(app) as c:
-        yield c
+**Почему `with TestClient(app) as client:`?**
+- Это включает lifespan (startup/shutdown)
+- Без `with` — lifespan не выполняется, engine не создаётся
 
+### Что тестировать
 
-def test_healthcheck(client):
-    resp = client.get("/api/health")
-    assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+```python
+def test_get_user_not_found(client):
+    resp = client.get("/api/users/99999")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "User not found"
+
+def test_create_user(client):
+    resp = client.post("/api/users", json={"name": "Alice", "email": "alice@ex.com"})
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["name"] == "Alice"
+    assert "id" in data
 ```
 
 ---
 
-## Dependency Override для тестов
+## 2. Dependency Override — изоляция тестов
 
 ```python
 from main import app, get_db
 
 @pytest.fixture
 async def test_db():
-    """In-memory SQLite для тестов"""
+    # In-memory SQLite для тестов
     engine = create_async_engine("sqlite+aiosqlite://", echo=True)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -47,29 +62,25 @@ async def test_db():
     await engine.dispose()
 ```
 
+**Почему это работает:** FastAPI при вызове `Depends(get_db)` смотрит в `dependency_overrides` — если там есть замена, использует её.
+
 ---
 
-## Тестируем авторизацию
+## 3. Contract Tests — проверка OpenAPI-схемы
 
 ```python
-from main import app, get_current_user
-
-TEST_USER = {"user_id": 1, "role": "admin"}
-
-@pytest.fixture(autouse=True)
-def override_auth():
-    app.dependency_overrides[get_current_user] = lambda: TEST_USER
-    yield
-    app.dependency_overrides.clear()
-
-def test_admin_endpoint(client):
-    resp = client.get("/api/admin/users")
-    assert resp.status_code == 200
+def test_all_endpoints_have_summary(client):
+    schema = client.get("/openapi.json").json()
+    for path, methods in schema["paths"].items():
+        for method in methods:
+            assert "summary" in methods[method], f"{method.upper()} {path} missing summary"
 ```
+
+**Зачем:** чтобы документация была полной, и фронтенд-разработчик знал, что делает эндпоинт.
 
 ---
 
-## Dockerfile
+## 4. Docker — multi-stage build
 
 ```dockerfile
 FROM python:3.12-slim AS builder
@@ -84,61 +95,11 @@ COPY . .
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
-```yaml
-# docker-compose.yml
-version: "3.9"
-services:
-  app:
-    build: .
-    ports: ["8000:8000"]
-    depends_on:
-      - db
-      - redis
-    environment:
-      DATABASE_URL: postgresql+asyncpg://user:pass@db:5432/app
-
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_PASSWORD: pass
-```
+**Зачем multi-stage:** финальный образ содержит только то, что нужно для запуска — без инструментов сборки. Размер ~120MB вместо ~300MB.
 
 ---
 
-## CI/CD (GitHub Actions)
-
-```yaml
-name: FastAPI CI
-on: [push]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: test
-          POSTGRES_DB: test
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pip install -r requirements.txt
-      - run: pytest tests/ -n auto --timeout=30 --cov=src
-```
-
----
-
-## Подводные камни
-
-| ❌ Ошибка | ✅ Правильно |
-|---|---|
-| TestClient без lifespan | `with TestClient(app) as client:` |
-| dependency_overrides не очищен | autouse фикстура с `app.dependency_overrides.clear()` |
-| Uvicorn без workers | `--workers 4` — на проде |
-| Не настроен healthcheck | `GET /health` — всегда нужен |
-
----
-
-> **На собесе:** «Как деплоите FastAPI?» — «Docker + docker-compose. Uvicorn с gunicorn
-> (--workers 4). Nginx как reverse-proxy. Healthcheck на /api/health. Alembic для миграций.»
+> **На собесе:** «Как деплоите FastAPI?» —  
+> «Docker + docker-compose. Uvicorn с 4 workers (через gunicorn или --workers).
+> Nginx как reverse-proxy. Healthcheck на /api/health. Alembic для миграций.
+> CI/CD — GitHub Actions с pytest --cov.»

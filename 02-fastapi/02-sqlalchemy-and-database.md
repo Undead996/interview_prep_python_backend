@@ -1,161 +1,126 @@
-# FastAPI + SQLAlchemy 2.0
+# FastAPI + SQLAlchemy 2.0 — глубокий разбор
+
+> **Цель:** понять, как работать с async SQLAlchemy в FastAPI, избегать N+1,
+> управлять транзакциями и connection pool'ом.
 
 ---
 
-## SQLAlchemy 2.0 — async engine
+## 1. Async engine и session — как это устроено
 
 ```python
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Integer, select, text
 
 DATABASE_URL = "postgresql+asyncpg://user:pass@localhost:5432/db"
 
-engine = create_async_engine(DATABASE_URL, pool_size=5, max_overflow=10)
+engine = create_async_engine(
+    DATABASE_URL,
+    pool_size=5,         # соединений в пуле (постоянно открыты)
+    max_overflow=10,     # доп. соединений сверх pool_size
+    pool_pre_ping=True,  # проверять соединение перед запросом
+    echo_pool=True,      # логировать создание/закрытие соединений
+)
 async_session = async_sessionmaker(engine, expire_on_commit=False)
-
-
-# --- Модели ---
-
-class Base(DeclarativeBase):
-    pass
-
-class User(Base):
-    __tablename__ = "users"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String(100))
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
 ```
+
+**Что значит `pool_size=5, max_overflow=10`:**
+- Держим 5 соединений всегда открытыми
+- При пике — до 15 (5 + 10)
+- После пика лишние закрываются
+
+**`expire_on_commit=False`:**
+- По умолчанию: после `commit()` все поля объекта становятся "expired" — при обращении к ним делается новый запрос
+- `False`: объект остаётся "живым" — поля доступны без запроса
+- В бэкенде почти всегда ставим `False`
 
 ---
 
-## Repository pattern с async session
+## 2. Repository Pattern
+
+**Почему Repository?** Потому что эндпоинт не должен знать, как устроен запрос:
 
 ```python
-from sqlalchemy import select, delete
-from sqlalchemy.ext.asyncio import AsyncSession
+# ❌ Без Repository — эндпоинт знает про SQLAlchemy
+@app.get("/users/{user_id}")
+async def get_user(user_id: int, db: AsyncSession = Depends(get_db)):
+    stmt = select(User).where(User.id == user_id)
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
 
-class UserRepository:
-    def __init__(self, session: AsyncSession):
-        self.session = session
-
-    async def get_by_id(self, user_id: int) -> User | None:
-        stmt = select(User).where(User.id == user_id)
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def create(self, name: str, email: str) -> User:
-        user = User(name=name, email=email)
-        self.session.add(user)
-        await self.session.commit()
-        await self.session.refresh(user)
-        return user
-
-    async def list(self, skip: int = 0, limit: int = 100) -> list[User]:
-        stmt = select(User).offset(skip).limit(limit)
-        result = await self.session.execute(stmt)
-        return list(result.scalars().all())
+# ✅ С Repository — эндпоинт вызывает бизнес-метод
+@app.get("/users/{user_id}")
+async def get_user(user_id: int, repo: UserRepository = Depends(get_user_repo)):
+    return await repo.get_by_id(user_id)
 ```
+
+**Repository инкапсулирует:**
+- Тип запроса (ORM vs raw SQL)
+- Стратегию загрузки (joinedload, selectinload)
+- Логику повторных попыток
 
 ---
 
-## Dependency Injection в FastAPI
+## 3. N+1 проблема — детально
 
-```python
-async def get_db():
-    async with async_session() as session:
-        yield session
-
-async def get_user_repo(db: AsyncSession = Depends(get_db)):
-    return UserRepository(db)
-
-@app.get("/api/users/{user_id}")
-async def get_user(
-    user_id: int,
-    repo: UserRepository = Depends(get_user_repo),
-):
-    user = await repo.get_by_id(user_id)
-    if not user:
-        raise HTTPException(status_code=404)
-    return user
-```
-
----
-
-## N+1 проблема
+**Проблема:** делаем 1 запрос на список + N запросов на каждую строку.
 
 ```python
 # ❌ N+1 — на каждую категорию отдельный запрос
 users = await session.execute(select(User))
 for user in users.scalars():
-    print(user.category.name)  # ❌ Каждый раз запрос!
+    print(user.category.name)  # ← ещё один запрос!
+```
 
-# ✅ Eager loading — joinedload или selectinload
+**Решение:** сказать SQLAlchemy, какие отношения загрузить сразу.
+
+```python
 from sqlalchemy.orm import joinedload, selectinload
 
+# Для many-to-one (User → Category) — joinedload (LEFT JOIN)
 stmt = select(User).options(joinedload(User.category))
-result = await session.execute(stmt)
+
+# Для one-to-many / many-to-many (Order → Items) — selectinload (второй запрос с WHERE IN)
+stmt = select(Order).options(selectinload(Order.items))
 ```
+
+**Когда какой:**
+| Отношение | Рекомендация | SQL |
+|-----------|-------------|-----|
+| Many-to-one (User.category) | `joinedload` | `LEFT JOIN` |
+| One-to-many (Order.items) | `selectinload` | `WHERE order_id IN (...)` |
+| Many-to-many (Student.courses) | `selectinload` | `WHERE course_id IN (...)` через join-таблицу |
 
 ---
 
-## Транзакции
+## 4. Транзакции — как управлять
 
 ```python
 async def transfer_money(db: AsyncSession, from_id: int, to_id: int, amount: float):
+    # begin() — начало транзакции
     async with db.begin():
-        # Если ошибка — обе таблицы не изменятся
         stmt1 = text("UPDATE accounts SET balance = balance - :a WHERE id = :f")
         stmt2 = text("UPDATE accounts SET balance = balance + :a WHERE id = :t")
         await db.execute(stmt1, {"a": amount, "f": from_id})
         await db.execute(stmt2, {"a": amount, "t": to_id})
+    # commit() автоматически при выходе из async with
+    # rollback() — если исключение
 ```
 
----
-
-## Alembic — миграции
-
-```bash
-alembic init alembic
-alembic revision --autogenerate -m "add users table"
-alembic upgrade head
-alembic downgrade -1  # откат
-```
+**Savepoints — вложенные транзакции:**
 
 ```python
-# alembic/env.py
-from models import Base  # Импорт моделей для autogenerate
-target_metadata = Base.metadata
+async with db.begin():
+    user = await create_user(db, ...)
+    # Точка сохранения
+    async with db.begin_nested():
+        order = await create_order(db, user.id, ...)
+        if order.total > user.limit:
+            # rollback только order, user остаётся
+            raise ValueError("Limit exceeded")
+    # user.commit() всё равно произойдёт
 ```
 
 ---
 
-## Connection pool
-
-```python
-engine = create_async_engine(
-    DATABASE_URL,
-    pool_size=10,       # кол-во соединений в пуле
-    max_overflow=20,    # доп. соединений сверх pool_size
-    pool_pre_ping=True, # проверка соединения перед запросом
-    pool_recycle=1800,  # переиспользовать через 30 мин
-)
-```
-
----
-
-## Подводные камни
-
-| ❌ Ошибка | ✅ Правильно |
-|---|---|
-| `session.commit()` без `refresh()` | После commit объект detached — `await session.refresh(obj)` |
-| `expire_on_commit=True` (default) | После commit — доступ к полям вызывает запрос. `False` — безопаснее |
-| N+1 с async | `selectinload` для many-to-many, `joinedload` для many-to-one |
-| Не закрывать engine | `await engine.dispose()` в lifespan shutdown |
-
----
-
-> **Технически:** SQLAlchemy 2.0 — ORM и Core. Async требует asyncpg (для PG)
-> или aiosqlite (для SQLite). Пул соединений — `QueuePool` для sync, `AsyncAdaptedQueuePool`
-> для async. `expire_on_commit=False` — объект жив после commit.
+> **Технически:** SQLAlchemy 2.0 — ORM и Core в одном. Async требует asyncpg
+> (для PostgreSQL) или aiosqlite (для SQLite). Пул соединений — `QueuePool`
+> для sync, `AsyncAdaptedQueuePool` для async.

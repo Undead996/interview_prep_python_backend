@@ -1,4 +1,4 @@
-# Шпаргалка: RabbitMQ
+# Шпаргалка: RabbitMQ — последний день
 
 ---
 
@@ -15,7 +15,6 @@ rabbitmqctl status                        # здоровье
 
 ```
 Producer → Exchange → (binding) → Queue → Consumer
-
 Exchange: direct / fanout / topic / headers
 Queue: durable, auto_delete, arguments (x-message-ttl, x-dead-letter-exchange)
 ```
@@ -29,6 +28,12 @@ await channel.default_exchange.publish(
     aio_pika.Message(body=b"hello", delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
     routing_key="queue.name",
 )
+# Consumer
+queue = await channel.declare_queue("queue.name", durable=True)
+async with queue.iterator() as qiter:
+    async for message in qiter:
+        async with message.process():
+            print(message.body.decode())
 ```
 
 ## Гарантии
@@ -36,14 +41,14 @@ await channel.default_exchange.publish(
 ```
 Publisher confirm  → потеря на стороне producer
 Consumer ack       → потеря на стороне consumer
-DLX                → dead letter при reject
+DLX                → dead letter при reject/expiry
 Outbox pattern     → гарантия записи + отправки
 ```
 
 ## Ack / Nack / Reject
 
 ```python
-ch.basic_ack(delivery_tag=method.delivery_tag)      # успех
+ch.basic_ack(delivery_tag=method.delivery_tag)      # успех — удалить
 ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)   # retry
 ch.basic_reject(delivery_tag=method.delivery_tag, requeue=False) # → DLX
 ```

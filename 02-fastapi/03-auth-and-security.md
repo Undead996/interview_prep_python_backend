@@ -1,145 +1,120 @@
-# FastAPI: Auth, Security, Rate Limiting
+# FastAPI: Auth, Security, Rate Limiting — глубоко
+
+> **Цель:** понять, как работает JWT (не просто скопировать код), построить
+> правильную аутентификацию и защиту от DDoS.
 
 ---
 
-## JWT + OAuth2
+## 1. JWT — что внутри токена
+
+JWT (JSON Web Token) — это **три base64-закодированные строки**, разделённые точкой:
+
+```
+header.payload.signature
+```
+
+### Header
+```json
+{"alg": "HS256", "typ": "JWT"}
+```
+
+### Payload (claims)
+```json
+{
+  "sub": "42",           // subject — идентификатор пользователя
+  "exp": 1712345678,    // expires — когда истекает (Unix time)
+  "iat": 1712342078,    // issued at — когда создан
+  "role": "admin"       // кастомные поля
+}
+```
+
+### Signature
+HMAC-SHA256(`base64(header) + "." + base64(payload)`, SECRET_KEY)
+
+**Кто угодно может прочитать payload** (base64 — не шифрование, а кодирование). Signature нужна, чтобы убедиться, что токен **не подделан**.
+
+**Как проверить:** сервер вычисляет HMAC-SHA256 от header+payload с своим SECRET_KEY и сравнивает с signature. Если совпадает — токен настоящий.
+
+### Почему `exp` обязателен?
 
 ```python
-from datetime import datetime, timedelta, timezone
-from jose import JWTError, jwt
-from passlib.context import CryptContext
+# ❌ Без exp — токен живёт вечно!
+token = jwt.encode({"sub": "1"}, SECRET_KEY, algorithm="HS256")
+# Через год — всё ещё валиден!
 
-SECRET_KEY = "secret-please-use-env"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
-def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
-
-def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
-
-
-def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=15))
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-
-async def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: AsyncSession = Depends(get_db),
-) -> User:
-    credentials_exception = HTTPException(
-        status_code=401,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: int = payload.get("sub")
-        if user_id is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-
-    user = await user_repo.get_by_id(db, user_id)
-    if user is None:
-        raise credentials_exception
-    return user
+# ✅ С exp — токен умирает
+token = jwt.encode(
+    {"sub": "1", "exp": datetime.now(timezone.utc) + timedelta(minutes=30)},
+    SECRET_KEY,
+    algorithm="HS256",
+)
 ```
 
 ---
 
-## OAuth2 Password Flow
+## 2. OAuth2 Password Flow — как это работает
 
-```python
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
-
-@app.post("/api/auth/login")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = await user_repo.get_by_email(db, form_data.username)
-    if not user or not verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    token = create_access_token({"sub": str(user.id)})
-    return {"access_token": token, "token_type": "bearer"}
 ```
+POST /api/auth/login {username, password}
+  ↓
+1. Ищем пользователя по email/username
+2. Сравниваем пароль (bcrypt)
+3. Создаём JWT (sub=user.id, exp=30 min)
+4. Возвращаем {"access_token": "...", "token_type": "bearer"}
+  ↓
+Клиент сохраняет токен (localStorage / cookie)
+  ↓
+GET /api/profile Authorization: Bearer <token>
+  ↓
+1. FastAPI получает Bearer-токен (OAuth2PasswordBearer)
+2. Декодируем JWT (секрет + алгоритм)
+3. Проверяем exp
+4. Получаем user_id из sub
+5. Загружаем пользователя из БД
+6. Возвращаем пользователя
+```
+
+**Важно:** OAuth2 Password Flow — это **аутентификация** (кто ты), а не авторизация (что тебе можно). Для авторизации — RBAC (Role-Based Access Control).
 
 ---
 
-## Role-based access
+## 3. Rate Limiting — защита от DDoS
+
+### In-memory (для development)
 
 ```python
-from functools import wraps
-from typing import Literal
-
-def require_role(role: Literal["admin", "manager"]):
-    def dependency(current_user: User = Depends(get_current_user)):
-        if current_user.role != role:
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
-        return current_user
-    return dependency
-
-@app.get("/api/admin/users")
-async def admin_list_users(
-    current_user: User = Depends(require_role("admin")),
-    db: AsyncSession = Depends(get_db),
-):
-    ...
-```
-
----
-
-## Rate Limiting (in-memory)
-
-```python
-import time
-from collections import defaultdict
-
 class RateLimiter:
     def __init__(self):
-        self._requests: dict[str, list[float]] = defaultdict(list)
+        self._requests: dict[str, list[float]] = {}
 
     async def check(self, key: str, max_calls: int = 100, period: float = 60.0):
         now = time.monotonic()
         self._requests[key] = [t for t in self._requests[key] if now - t < period]
         if len(self._requests[key]) >= max_calls:
-            raise HTTPException(
-                status_code=429,
-                detail="Rate limit exceeded",
-                headers={"Retry-After": str(int(period))},
-            )
+            raise HTTPException(status_code=429, headers={"Retry-After": str(int(period))})
         self._requests[key].append(now)
+```
 
-rate_limiter = RateLimiter()
+**Проблема:** при рестарте сервера — сброс. Не работает с горизонтальным масштабированием.
 
-@app.middleware("http")
-async def rate_limit_middleware(request: Request, call_next):
-    client_ip = request.client.host
-    await rate_limiter.check(client_ip)
-    response = await call_next(request)
-    return response
+### С Redis — для продакшена
+
+```python
+async def check_rate_limit(redis: Redis, key: str, max_calls: int, window: int):
+    current = int(time.time()) // window
+    redis_key = f"ratelimit:{key}:{current}"
+    
+    count = await redis.incr(redis_key)
+    if count == 1:
+        await redis.expire(redis_key, window + 1)
+    
+    if count > max_calls:
+        raise HTTPException(status_code=429)
 ```
 
 ---
 
-## Подводные камни
-
-| ❌ Ошибка | ✅ Правильно |
-|---|---|
-| JWT без `exp` | Токен живёт вечно — всегда ставьте `exp` |
-| Хранить пароль в plain text | bcrypt / argon2 через passlib |
-| Rate limiting без key | По user_id или IP — иначе легко обойти |
-| Не верифицировать после JWT decode | Всегда проверять `sub` и `exp` |
-
----
-
-> **Технически:** JWT — stateless, Payload + Signature. Passlib — hashing библиотека.
-> OAuth2 — протокол авторизации (не аутентификации). Rate limiting — защита от DDoS.
+> **На собесе:** «Как работает JWT?» —  
+> «JWT — это три base64-части: header (алгоритм), payload (данные + exp),
+> signature (HMAC-подпись). Сервер проверяет подпись секретным ключом.
+> payload читает кто угодно — не кладите туда пароли!»

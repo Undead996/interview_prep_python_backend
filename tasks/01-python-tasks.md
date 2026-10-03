@@ -1,14 +1,10 @@
-# Задачи Python
+# Задачи Python — расширенный разбор
 
 ---
 
 ## Задача 1. Bulk insert с async
 
-**Условие:** Напишите функцию `bulk_insert_users`, которая вставляет 1000 пользователей
-батчами по 100. Используйте async + asyncpg.
-
-<details>
-<summary>Решение</summary>
+**Условие:** Напишите функцию `bulk_insert_users`, которая вставляет 1000 пользователей батчами по 100. Используйте async + asyncpg.
 
 ```python
 import asyncio
@@ -22,7 +18,7 @@ class User:
 async def bulk_insert_users(pool, users: list[User], batch_size: int = 100):
     async with pool.acquire() as conn:
         for i in range(0, len(users), batch_size):
-            batch = users[i:i+batch_size]
+            batch = users[i:i + batch_size]
             values = [(u.name, u.email) for u in batch]
             await conn.executemany(
                 "INSERT INTO users (name, email) VALUES ($1, $2)",
@@ -35,17 +31,14 @@ async def main():
     await bulk_insert_users(pool, users)
     await pool.close()
 ```
-</details>
+
+**Почему батчи:** каждый `INSERT` — round-trip к БД. 10 батчей по 100 = 10 round-trip вместо 1000. Ускорение ~100x.
 
 ---
 
 ## Задача 2. Rate limiting декоратор
 
-**Условие:** Напишите декоратор `@rate_limit(max_calls=5, period=10)` — не более
-5 вызовов за 10 секунд. При превышении — `RateLimitExceeded`.
-
-<details>
-<summary>Решение</summary>
+**Условие:** Декоратор `@rate_limit(max_calls=5, period=10)` — не более 5 вызовов за 10 секунд. При превышении — `RateLimitExceeded`.
 
 ```python
 import time
@@ -70,16 +63,12 @@ def rate_limit(max_calls: int, period: float):
         return wrapper
     return decorator
 ```
-</details>
+
+**Почему `timestamps[:] = ...`:** чтобы изменить исходный список (в замыкании), а не создать новый.
 
 ---
 
 ## Задача 3. Async генератор для пагинации API
-
-**Условие:** Напишите асинхронный генератор, который проходит по страницам API.
-
-<details>
-<summary>Решение</summary>
 
 ```python
 import httpx
@@ -101,10 +90,5 @@ async def process():
     async for user in paginate("https://api.example.com/users"):
         process_user(user)
 ```
-</details>
 
----
-
-> **На собесе:** Если задача на async — сначала уточни: asyncio или asyncio +
-> library (httpx, asyncpg, aio-pika). Покажи понимание batched operations
-> (list[batch]) и resource cleanup (async with).
+**Что проверяют:** async-генератор (yield внутри async def), обработка пустой страницы (break).

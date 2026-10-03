@@ -1,144 +1,88 @@
-# RabbitMQ: Надёжность и паттерны
+# RabbitMQ: Надёжность и паттерны — глубоко
+
+> **Цель:** понять, как гарантировать, что сообщение **точно дойдёт** до consumer,
+> и как организовать retry + DLX.
 
 ---
 
-## Publisher Confirms
+## 1. Publisher Confirms — как producer узнаёт, что сообщение дошло
 
 ```python
-import pika
+channel.confirm_delivery()  # включает подтверждения
 
-# Включить подтверждения публикации
-channel.confirm_delivery()
-
-def on_publish_confirm(frame):
+def on_confirm(frame):
     if isinstance(frame, pika.frame.ConfirmFrame):
-        print("Message delivered to broker")
+        print("Сообщение получено брокером")
     else:
-        print("Message lost!")
+        print("Сообщение ПОТЕРЯНО!")
 
 channel.basic_publish(
     exchange="orders",
     routing_key="order.created",
     body=msg,
-    mandatory=True,  # требовать очередь
+    mandatory=True,  # сообщение ТРЕБУЕТ очередь
 )
 ```
 
+**Без publisher confirms:** producer отправляет и "забывает". Если брокер упал до записи — сообщение потеряно.
+
+**С publisher confirms:** producer ждёт подтверждения от брокера, что сообщение сохранилось (и продублировано на реплики).
+
 ---
 
-## Consumer Ack
+## 2. Consumer Ack — как consumer сообщает, что обработал
+
+```
+Consumer получил → обработал → basic_ack → сообщение удаляется
+                            → basic_nack + requeue=True → возвращается в очередь
+                            → basic_reject + requeue=False → в DLX
+```
 
 ```python
 def callback(ch, method, properties, body):
     try:
         process_order(body)
-        ch.basic_ack(delivery_tag=method.delivery_tag)
+        ch.basic_ack(delivery_tag=method.delivery_tag)  # ✅ успех — удалить
     except TemporaryError:
-        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)  # повторить
     except PermanentError:
         ch.basic_reject(delivery_tag=method.delivery_tag, requeue=False)  # → DLX
 ```
 
-| Действие | Поведение |
-|---|---|
-| `ack` | Сообщение удалено из очереди |
-| `nack + requeue=True` | Сообщение возвращается в очередь |
-| `reject + requeue=False` | Сообщение → DLX |
-| TCP упал без ack | Сообщение возвращается в очередь (после timeout) |
+**Важно:** если TCP-соединение упало **без ack**, после таймаута сообщение возвращается в очередь (другой consumer его получит). Это даёт **at-least-once** гарантию.
 
 ---
 
-## Ретраи (Outbox Pattern)
+## 3. Outbox Pattern — гарантия "запись + отправка"
+
+**Проблема:** приложение записывает в БД, потом шлёт в RabbitMQ. Если упадёт между ними — сообщение потеряно:
 
 ```
-                    ┌──────────────┐
-  POST /api/orders  │    Outbox    │
-       ───────────→ │ (таблица БД) │──→ Poller ───→ RabbitMQ
-                    └──────────────┘
+1. Запись в БД ✅
+2. [CRASH!] → отправка не произошла → сообщение потеряно
 ```
 
-```python
-# Outbox pattern — atomic write to DB + send
-async def create_order(payload):
-    async with db.begin():
-        order = await repo.create(payload)
-        # Сохраняем в outbox (таблица БД)
-        await outbox_repo.add(order.id, "order.created")
+**Решение (Outbox pattern):**
+```
+1. В той же транзакции: запись в бизнес-таблицу + запись в outbox-таблицу
+2. Фоновый poller читает outbox, отправляет в RabbitMQ
+3. После подтверждения от RMQ — помечает outbox.status = 'done'
+4. При старте — повторяем все pending
+```
 
-# Poller читает outbox и шлёт в RabbitMQ
-async def outbox_poller():
-    while True:
-        events = await outbox_repo.get_pending()
-        for event in events:
-            try:
-                await publish(event.topic, event.payload)
-                await outbox_repo.mark_done(event.id)
-            except Exception:
-                pass  # retry next poll
-        await asyncio.sleep(1)
+```sql
+CREATE TABLE outbox (
+    id BIGSERIAL,
+    topic TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    status TEXT DEFAULT 'pending',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
 ```
 
 ---
 
-## TTL (Time-To-Live)
-
-```python
-# TTL сообщения (24 часа)
-channel.basic_publish(
-    exchange="orders",
-    routing_key="order.expired",
-    body=msg,
-    properties=pika.BasicProperties(
-        expiration="86400000",  # 24h в ms
-    ),
-)
-
-# TTL очереди
-channel.queue_declare(
-    queue="temporary",
-    arguments={"x-message-ttl": 3600000}  # 1 час
-)
-```
-
----
-
-## Quorum Queues (кластер)
-
-```python
-# Гарантированная доставка в кластере
-channel.queue_declare(
-    queue="important",
-    arguments={
-        "x-queue-type": "quorum",
-        "x-quorum-initial-cluster-size": 3,
-    }
-)
-```
-
----
-
-## RabbitMQ vs Kafka (коротко)
-
-| RabbitMQ | Kafka |
-|---|---|
-| Умный брокер, тупой consumer | Тупой брокер, умный consumer |
-| Сообщение — 1 раз (ack — удалено) | Хранится, пока не expire |
-| Порядок в одной очереди | Порядок в одной партиции |
-| Лучше: синхронные RPC, подтверждения | Лучше: стримы, реплаи, Big Data |
-
----
-
-## Подводные камни
-
-| ❌ Ошибка | ✅ Правильно |
-|---|---|
-| `nack` без задержки — бесконечный цикл | `basic_reject` → DLX |
-| Не включить publisher confirms | Потеря сообщения на стороне брокера |
-| Одна очередь для всего | Разделить по типу: orders, notifications |
-| Нет мониторинга | `rabbitmqctl list_queues` — размер, consumer count |
-
----
-
-> **Технически:** Publisher confirms + consumer ack = at-least-once доставка.
-> Outbox pattern гарантирует, что сообщение записано в БД до отправки.
-> Quorum queues обеспечивают согласованность в кластере.
+> **На собесе:** «Как гарантировать доставку в RabbitMQ?» —  
+> «Три уровня: 1) Publisher confirms — producer ждёт, что брокер получил сообщение.
+> 2) Consumer ack — consumer подтверждает обработку. 3) Outbox pattern —
+> атомарная запись в БД + очередь через таблицу outbox. DLX для упавших.»

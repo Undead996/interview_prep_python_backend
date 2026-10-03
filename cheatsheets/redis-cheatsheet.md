@@ -1,4 +1,4 @@
-# Шпаргалка: Redis
+# Шпаргалка: Redis — последний день
 
 ---
 
@@ -6,9 +6,8 @@
 
 ```bash
 redis-cli
-  SET key value
+  SET key value [EX 3600]
   GET key
-  EXPIRE key 3600
   INCR counter
   LPUSH queue value
   RPOP queue
@@ -20,14 +19,14 @@ redis-cli
 
 ## Структуры
 
-| Тип | Команды |
-|---|---|
-| String | `GET`, `SET`, `SETEX`, `INCR`, `INCRBY` |
-| List | `LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LLEN`, `LRANGE` |
-| Set | `SADD`, `SMEMBERS`, `SINTER`, `SUNION`, `SCARD` |
-| Hash | `HSET`, `HGET`, `HGETALL`, `HDEL`, `HINCRBY` |
-| Sorted Set | `ZADD`, `ZRANK`, `ZREVRANK`, `ZRANGE`, `ZREVRANGE` |
-| Stream | `XADD`, `XREAD`, `XREADGROUP`, `XACK`, `XGROUP` |
+| Тип | Команды | Когда |
+|-----|---------|-------|
+| String | `GET`, `SET`, `SETEX`, `INCR` | Кэш, счётчики |
+| List | `LPUSH`, `RPOP`, `LLEN` | Очереди (без гарантий) |
+| Set | `SADD`, `SMEMBERS`, `SINTER` | Уникальные значения |
+| Hash | `HSET`, `HGET`, `HGETALL` | Объекты |
+| Sorted Set | `ZADD`, `ZRANGE`, `ZREVRANGE` | Рейтинги |
+| Stream | `XADD`, `XREADGROUP`, `XACK` | Надёжные очереди |
 
 ## Python (redis.asyncio)
 
@@ -41,15 +40,15 @@ await r.incr("counter")
 ## Persistence
 
 ```
-RDB (dump.rdb)  — снэпшоты
-AOF             — лог запросов
+RDB (dump.rdb)  — снэпшоты (потеря минут)
+AOF             — лог запросов (потеря секунды)
 RDB + AOF       — лучшее из двух
 ```
 
 ## HA
 
 ```
-Sentinel — failover master → replica
+Sentinel — failover master → replica (HA)
 Cluster  — шардирование (16384 слотов) + HA
 ```
 
@@ -59,4 +58,14 @@ Cluster  — шардирование (16384 слотов) + HA
 key = f"rl:{ip}:{int(time.time()) // 60}"
 count = await r.incr(key)
 await r.expire(key, 61)
+```
+
+## Distributed Lock
+
+```python
+lock_value = str(uuid.uuid4())
+await r.setnx(f"lock:{name}", lock_value)
+await r.expire(f"lock:{name}", 10)
+# Lua для атомарного удаления:
+"if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
 ```

@@ -1,4 +1,4 @@
-# Шпаргалка: Apache Kafka
+# Шпаргалка: Apache Kafka — последний день
 
 ---
 
@@ -16,7 +16,6 @@ kafka-console-consumer --bootstrap-server localhost:9092 --topic orders --from-b
 
 ```
 Topic → Partition (append-only log) → Consumer Group (offset)
-
 Producer → key hash → partition (ordered for same key)
 Consumer → group.id → partitions распределяются между consumers
 

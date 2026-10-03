@@ -1,125 +1,88 @@
-# RabbitMQ: AMQP-концепции
+# RabbitMQ: AMQP-концепции — глубоко
+
+> **Цель:** понять AMQP-модель "снизу": exchange, queue, binding, DLX, vhosts.
 
 ---
 
-## Что такое AMQP
-
-> **Простыми словами:** RabbitMQ — это почтальон. Приложение шлёт сообщение в очередь,
-> почтальон доставляет его подписчику. Если подписчик занят — сообщение ждёт.
+## 1. AMQP-модель — что куда идёт
 
 ```
-               ┌──────────┐
-  Producer ───→│ Exchange │───→ Queue ───→ Consumer
-               │   (type) │
-               └──────────┘
+Producer → Exchange → (bindings) → Queue → Consumer
+```
+
+**Producer** — приложение, которое шлёт сообщение. Он не знает, кто его прочитает.
+
+**Exchange** — "почтальон", решает, в какую очередь положить сообщение.
+
+**Queue** — буфер, где сообщения ждут, пока consumer их заберёт.
+
+**Consumer** — приложение, которое читает (может подтвердить = ack).
+
+**Binding** — правило: "сообщения с routing_key = X клади в очередь Y".
+
+---
+
+## 2. Типы Exchange — как они работают
+
+| Тип | Маршрутизация | Характеристики |
+|-----|--------------|----------------|
+| **Direct** | routing_key = queue name | 1:1, точное совпадение |
+| **Fanout** | всем подписанным очередям | 1:N, broadcast |
+| **Topic** | routing_key по шаблону (topic.#) | Гибкая маршрутизация |
+| **Headers** | по заголовкам (key-value) | Максимальная гибкость |
+
+### Direct — когда нужно отправить "точно в одну очередь"
+
+```
+Producer → Exchange(direct) → binding("order.created") → Queue "orders"
+```
+
+### Fanout — когда нужно разослать всем
+
+```
+Producer → Exchange(fanout) → Queue "email" (всем)
+                             → Queue "sms" (всем)
+                             → Queue "push" (всем)
+```
+
+### Topic — когда нужно фильтровать по routing key
+
+```
+Producer отправляет с routing_key = "user.created.europe"
+Exchange(topic) → binding("user.#") → Queue "user-events"
+                → binding("*.created.*") → Queue "creation-events"
 ```
 
 ---
 
-## Exchanges — типы
+## 3. Dead Letter Exchange (DLX)
 
-| Тип | Маршрутизация | Использование |
-|---|---|---|
-| **Direct** | exact routing key | RPC, конкретный адресат |
-| **Fanout** | broadcast всем | Логи, уведомления |
-| **Topic** | routing key по шаблону `topic.*` | События предметной области |
-| **Headers** | по заголовкам | Гибкая маршрутизация |
+**Проблема:** что происходит с сообщением, которое consumer не смог обработать?
+
+**Без DLX:** reject → сообщение **теряется навсегда**.
+
+**С DLX:** reject → сообщение уходит на DLX → его может прочитать специальный consumer (мониторинг ошибок, повторная попытка).
 
 ```python
-# Direct
-channel.basic_publish(exchange="orders", routing_key="order.created", body=msg)
-
-# Fanout
-channel.basic_publish(exchange="logs", routing_key="", body=log_entry)
-# Все подписчики получат копию
-
-# Topic
-channel.basic_publish(exchange="events", routing_key="user.created", body=msg)
-# Consumer подписан на routing_key="user.#"
-```
-
----
-
-## Queues — свойства
-
-| Аттрибут | Назначение | Пример |
-|---|---|---|
-| `durable=True` | Очередь живёт после рестарта RabbitMQ | Важные задачи |
-| `auto_delete` | Удаляется, когда отключился последний consumer | RPC |
-| `exclusive` | Только для одного соединения | Временные |
-| `arguments` | `x-max-priority`, `x-message-ttl` | Специфические |
-
----
-
-## Dead Letter Exchange (DLX)
-
-```
-                DLX (dead-letter exchange)
-                    ↑
-Producer → Exchange → [Queue] → Consumer (ack)
-                         ↓ failed
-                    [DL Queue] → DL Consumer
-```
-
-Сообщение попадает в DLX если:
-- Consumer rejects (`basic.reject`) с `requeue=false`
-- Истек TTL сообщения
-- Достигнут лимит попыток
-
-```python
-# Настройка DLX при объявлении очереди
+# Настройка DLX для очереди
 channel.queue_declare(
     queue="orders",
     arguments={
-        "x-dead-letter-exchange": "orders.dlx",
+        "x-dead-letter-exchange": "orders.dlx",  # куда уходят упавшие
         "x-message-ttl": 86400000,  # 24 часа в ms
     }
 )
 ```
 
----
-
-## VHosts (виртуальные хосты)
-
-```
-RabbitMQ
- ├── vhost "/"         (разработка)
- ├── vhost "staging"   (тестирование)
- └── vhost "prod"      (продакшен)
-```
-
-Изоляция: приложения не видят очереди друг друга. Пользователи + права — на vhost.
+**Когда сообщение попадает в DLX:**
+1. `basic.reject` с `requeue=false`
+2. Истечение TTL (x-message-ttl)
+3. Превышение лимита попыток (через custom header x-retry)
 
 ---
 
-## Channels (каналы)
-
-Одно TCP-соединение — много каналов. Канал — логический поток сообщений.
-Используйте разные каналы для разных воркеров.
-
-```python
-connection = pika.BlockingConnection(params)
-channel1 = connection.channel()  # канал для publish
-channel2 = connection.channel()  # канал для consume
-```
-
----
-
-## Подводные камни
-
-| ❌ Ошибка | ✅ Правильно |
-|---|---|
-| `queue_declare` каждый раз при старте | Только при создании — Idempotent (но лишнее) |
-| Нет `durable` на очереди | Выживет только в памяти |
-| Exchange fanout без consumer | Сообщение теряется — очереди нет |
-| DLX не настроен | Сообщения пропадают при reject |
-
----
-
-> **Технически:** AMQP — протокол прикладного уровня. Сообщение → Exchange →
-> (bindings) → Queue → Consumer. Подтверждение — ack/nack.
->
-> **На собесе:** «Как работает RabbitMQ?» — «Producer шлёт сообщение в exchange.
-> Exchange по binding rules кладёт в очередь. Consumer берёт (pull) или получает
-> (push). После обработки — ack. Если ack нет — сообщение вернётся в очередь
-> (после timeout).»
+> **На собесе:** «Как работает RabbitMQ?» —  
+> «Producer отправляет сообщение в exchange. Exchange по routing key
+> и bindings кладёт в очередь. Consumer забирает (pull) или получает
+> (push). После обработки — ack. Если ack нет — сообщение возвращается
+> в очередь (после timeout). DLX для упавших сообщений.»

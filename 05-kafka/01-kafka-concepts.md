@@ -1,101 +1,86 @@
-# Apache Kafka — концепции
+# Apache Kafka — концепции (расширенно)
+
+> **Цель:** понять, как устроен Kafka "снизу": почему он быстрый, чем отличается
+> от RabbitMQ, когда выбирать.
 
 ---
 
-## Что такое Kafka
+## 1. Что такое Kafka на уровне данных
 
-> **Простыми словами:** Kafka — это «склад» сообщений. Producer пишет в конец лога,
-> consumer читает с того места, которое ему интересно. В отличие от RabbitMQ,
-> сообщение не исчезает после прочтения — его могут прочитать несколько раз
-> разные consumers.
+Когда producer пишет в Kafka:
 
 ```
- Producer ──→ ┌──────────────────────┐
-               │   Partition 0        │
-               │ ┌────┬────┬────┬────┐│ ← Topic
-               │ │msg1│msg2│msg3│msg4││
-               │ └────┴────┴────┴────┘│
-               └──────────────────────┘
-                          ↓
- Consumer Group (offset = 2)
+Producer → Topic "orders"
+              └── Partition 0: [msg0, msg1, msg2, ...]  → append-only log
+              └── Partition 1: [msg0, msg1, ...]         → append-only log
 ```
+
+**Kafka — это распределённый commit log.** Каждое сообщение **не удаляется** после прочтения. Оно хранится N дней (настраивается).
+
+**Отличие от RabbitMQ:** в RabbitMQ сообщение исчезает после ack. В Kafka оно остаётся — его могут прочитать другие consumers или перечитать те же.
 
 ---
 
-## Основные концепции
+## 2. Partition — единица параллелизма
 
-| Понятие | Описание |
-|---|---|
-| **Topic** | Категория сообщений (как таблица) |
-| **Partition** | Физический сегмент сообщений (append-only log) |
-| **Producer** | Пишет сообщения в topic |
-| **Consumer** | Читает сообщения из topic |
-| **Consumer Group** | Группа consumers, делящая partitions |
-| **Offset** | Позиция consumer в partition (номер сообщения) |
-| **Broker** | Сервер Kafka |
-| **Zookeeper / KRaft** | Координация кластера |
+```python
+# Producer выбирает partition
+# 1. Round-robin (равномерно)
+await producer.send("orders", value=b"data")
+
+# 2. Key-hash (один key → одна partition)
+await producer.send("orders", key=b"user_42", value=b"data")
+# Все заказы user_42 — в одной partition → строгий порядок!
+```
+
+**Следствие:** один consumer может читать одну partition. Если вам нужно 10 параллельных consumers — нужно 10 partition.
 
 ---
 
-## Topics и Partitions
+## 3. Consumer Group — как consumers делят partitions
 
 ```
-Topic "orders"
- ├── Partition 0 (leader на broker-1)
- │    msg[0], msg[1], msg[2], msg[3], ...
- ├── Partition 1 (leader на broker-2)
- │    msg[0], msg[1], msg[2], ...
- └── Partition 2 (leader на broker-3)
-      msg[0], msg[1], ...
-
-Producer выбирает partition по:
-- round-robin (равномерно)
-- key hash (user_id → partition 0 — порядок для пользователя)
+Topic "orders" (6 partitions)
+  Consumer Group "processors":
+    Consumer A: partitions [0, 1]
+    Consumer B: partitions [2, 3]
+    Consumer C: partitions [4, 5]
 ```
+
+Если Consumer B упал → ребаланс: A получает [0, 1, 2], C получает [3, 4, 5].
+
+**Во время ребаланса сообщения НЕ обрабатываются.** Минимизируйте ребалансы:
+- Стабильный `group.id`
+- `session.timeout.ms` — не слишком маленький
+- `CooperativeStickyAssignor` (Kafka 2.4+) — пошаговый ребаланс
 
 ---
 
-## Kafka vs RabbitMQ
+## 4. Kafka vs RabbitMQ — детально
 
-| Характеристика | RabbitMQ | Kafka |
-|---|---|---|
-| **Модель** | Smart broker, dumb consumer | Dumb broker, smart consumer |
-| **Хранение** | После ack — удалено | Хранится N дней (configurable) |
-| **Порядок** | В одной очереди | В одной partition |
-| **Скорость** | ~50K msg/s | ~1M msg/s |
-| **Ретраи** | Через DLX | Позиция offset — просто читать заново |
-| **RPC** | ✅ (reply-to) | ❌ (не предназначен) |
-| **Рефакторинг** | Легко (очереди) | Сложно (нужны новые topics) |
-| **Типичное** | Задачи, RPC, синхронные потоки | Event sourcing, стримы, Big Data |
+| Характеристика | RabbitMQ | Kafka | Почему |
+|---------------|---------|-------|--------|
+| Модель | Smart broker | Smart consumer | RMQ роутит, Kafka хранит |
+| Хранение | После ack — удалено | Хранится N дней | Kafka — лог событий |
+| Порядок | В одной очереди | В одной partition | Оба упорядочены |
+| Throughput | ~50K msg/s | ~1M msg/s | Kafka батчит |
+| Ретраи | Через DLX | Просто читать заново (offset) | Kafka удобнее для replay |
+| RPC | ✅ (reply-to) | ❌ | Kafka не для синхронных вызовов |
+| Типичное | Задачи, уведомления | Event sourcing, Big Data | — |
 
----
-
-## Когда выбирать Kafka, когда RabbitMQ
-
+**Когда выбирать:**
 ```
-Нужно:
-- Сообщение достанется одному потребителю  → RabbitMQ
-- Сообщение прочитают несколько раз        → Kafka
-- Нужно перечитать историю                 → Kafka
-- Низкая latency + RPC                     → RabbitMQ
-- Высокий throughput (1M+/с)               → Kafka
-- Event sourcing / CQRS                    → Kafka
+Сообщение одному → RabbitMQ
+Сообщение многим → Kafka
+История не нужна → RabbitMQ
+История нужна → Kafka
+RPC нужен → RabbitMQ
+High throughput → Kafka
 ```
 
 ---
 
-## Подводные камни
-
-| ❌ Ошибка | ✅ Правильно |
-|---|---|
-| `auto.offset.reset=latest` (default) | Новый consumer не читает существующие сообщения |
-| Одна partition = один consumer | Параллелизм только через больше partitions |
-| Нет мониторинга rebalancing | Consumer group ребалансится → остановка |
-| Сообщение > 1MB | По умолчанию max 1MB — меняется в конфиге |
-
----
-
-> **Технически:** Kafka — распределенный, аппендикс-лог. Сообщение хранится по
-> умолчанию 7 дней или до 1GB на partition (настраивается). Partition — фундаментальная
-> единица параллелизма. Consumer group — много consumers делят partitions.
-> Offset — «закладка» consumer в логе.
+> **На собесе:** «Kafka vs RabbitMQ — что выберете для нотификаций?» —  
+> «Если нотификацию нужно доставить один раз и забыть — RabbitMQ.
+> Если нужно хранить историю, перечитывать, несколько групп — Kafka.
+> Для email-нотификаций обычно RabbitMQ. Для event sourcing — Kafka.»

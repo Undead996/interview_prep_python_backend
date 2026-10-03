@@ -1,4 +1,4 @@
-# SQL-задачи с разбором (8 штук)
+# SQL-задачи с разбором — 8 штук + пояснения
 
 ---
 
@@ -6,27 +6,30 @@
 
 ```sql
 -- employee(id, name, salary)
+-- Решение 1: подзапрос
 SELECT MAX(salary) FROM employee
 WHERE salary < (SELECT MAX(salary) FROM employee);
 
--- Или
-SELECT salary FROM employee
+-- Решение 2: offset/limit (если нет дубликатов)
+SELECT DISTINCT salary FROM employee
 ORDER BY salary DESC
 OFFSET 1 LIMIT 1;
 ```
+
+**Почему два решения?** Первое работает с дубликатами (если две вторых зарплаты — вернёт одну). Второе — только если зарплаты уникальны. Интервьюер может спросить: "А что, если есть дубликаты?"
 
 ---
 
 ## Задача 2. Пользователи без заказов
 
 ```sql
--- users(id, name), orders(id, user_id, total)
+-- Решение 1: LEFT JOIN
 SELECT u.id, u.name
 FROM users u
 LEFT JOIN orders o ON o.user_id = u.id
 WHERE o.id IS NULL;
 
--- EXISTS — быстрее на больших таблицах
+-- Решение 2: EXISTS (быстрее на больших таблицах)
 SELECT u.id, u.name
 FROM users u
 WHERE NOT EXISTS (
@@ -34,12 +37,13 @@ WHERE NOT EXISTS (
 );
 ```
 
+**Когда EXISTS быстрее?** Когда заказов много, а пользователей без них мало. EXISTS останавливается на первом совпадении. LEFT JOIN читает всё.
+
 ---
 
 ## Задача 3. Топ-3 продукта за месяц
 
 ```sql
--- products(id, name), order_items(order_id, product_id, qty), orders(id, created_at)
 SELECT p.name, SUM(oi.qty * oi.price) AS total
 FROM products p
 JOIN order_items oi ON oi.product_id = p.id
@@ -50,18 +54,20 @@ ORDER BY total DESC
 LIMIT 3;
 ```
 
+**Почему GROUP BY p.id, p.name?** Потому что name может повторяться (?). id уникален, но в строгом PG все неагрегированные поля должны быть в GROUP BY.
+
 ---
 
 ## Задача 4. Дубликаты email
 
 ```sql
--- users(id, email, name)
+-- Только дубликаты
 SELECT email, COUNT(*)
 FROM users
 GROUP BY email
 HAVING COUNT(*) > 1;
 
--- Полная информация
+-- Полная информация + количество
 SELECT u.*, dup.cnt
 FROM users u
 JOIN (
@@ -89,6 +95,8 @@ GROUP BY created_at::date
 ORDER BY day;
 ```
 
+**`::date`** — приведение типа (PG-специфика). В MySQL — `CAST(created_at AS DATE)`.
+
 ---
 
 ## Задача 6. Накопительный итог (running total)
@@ -102,13 +110,13 @@ FROM daily_sales
 ORDER BY sale_date;
 ```
 
+**Оконная функция:** `SUM(amount) OVER (ORDER BY sale_date)` — суммирует от начала до текущей строки.
+
 ---
 
 ## Задача 7. Департамент с макс. средней зарплатой
 
 ```sql
--- employee(id, name, salary, department_id)
--- department(id, name)
 SELECT d.name, AVG(e.salary) AS avg_salary
 FROM department d
 JOIN employee e ON e.department_id = d.id
@@ -119,12 +127,9 @@ LIMIT 1;
 
 ---
 
-## Задача 8. Запрос с оконной функцией (категория + ранг)
+## Задача 8. Категория + ранг (оконная функция)
 
 ```sql
--- sales(id, product_id, amount, sale_date)
--- products(id, name, category_id)
--- categories(id, name)
 SELECT
     c.name AS category,
     p.name AS product,
@@ -135,6 +140,8 @@ JOIN products p ON p.id = s.product_id
 JOIN categories c ON c.id = p.category_id
 ORDER BY c.name, rank_in_category;
 ```
+
+**ROW_NUMBER()** — нумерует строки внутри каждой категории по убыванию суммы. Каждая категория — свой счёт с 1.
 
 ---
 
